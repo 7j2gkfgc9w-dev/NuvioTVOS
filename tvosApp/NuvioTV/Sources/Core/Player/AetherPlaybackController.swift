@@ -2426,8 +2426,44 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     /// Subtitle evaluation clock (Aether `sourceTime`).
     private(set) var sourceTimeSeconds: Double = 0
     private(set) var subtitleCues: [SubtitleCue] = []
+    
+    func currentSubtitleText(at time: Double) -> String? {
+        let active = subtitleCues.filter { cue in
+            time >= cue.startTime && time <= cue.endTime
+        }
+        let texts = active.compactMap(\.text).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !texts.isEmpty else { return nil }
+        return texts.joined(separator: "\n")
+    }
     private(set) var capabilities = PlaybackEngineCapabilities.aether
     var isPictureInPictureActive: Bool { engine.pictureInPictureActive }
+
+    @Published private(set) var startupProgress: StartupProgress?
+    var onStartupProgressChanged: ((StartupProgress?) -> Void)?
+
+    var loadingStepMessage: String? {
+        guard let stage = engine.startupProgress?.stage else {
+            return isPlayerLoading ? L10n.string("player_loading_buffering", fallback: "Buffering…") : nil
+        }
+        switch stage {
+        case .connecting:
+            return L10n.string("player_loading_preparing", fallback: "Connecting to stream…")
+        case .openingContainer:
+            return L10n.string("player_loading_detecting_format", fallback: "Detecting stream format…")
+        case .analyzingStreams:
+            return L10n.string("player_loading_detecting_format", fallback: "Analyzing streams…")
+        case .preparingDisplay:
+            return L10n.string("player_loading_preparing", fallback: "Matching display settings…")
+        case .selectingRoute:
+            return L10n.string("player_loading_building", fallback: "Selecting playback decoder…")
+        case .buildingSession:
+            return L10n.string("player_loading_building", fallback: "Building player engine…")
+        case .preparingPlayback:
+            return L10n.string("player_loading_buffering", fallback: "Buffering stream…")
+        case .awaitingFirstFrame, .presenting:
+            return L10n.string("player_loading_starting", fallback: "Starting stream…")
+        }
+    }
 
     /// True when the active Aether session can provide a scrub still. Native
     /// cache-backed stills stay the first choice; software video uses one
@@ -3075,7 +3111,10 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     private func observeEngine() {
         engine.$startupProgress
             .receive(on: DispatchQueue.main)
-            .sink { progress in
+            .sink { [weak self] progress in
+                guard let self else { return }
+                self.startupProgress = progress
+                self.onStartupProgressChanged?(progress)
                 guard let cp = progress?.checkpoint else { return }
                 switch cp {
                 case .sourceOpened:
@@ -3224,11 +3263,11 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
                 isPlayerPlaying = false
             }
             isPlayerEnded = false
-            currentErrorMessage = ""
         case .playing:
             isPlayerLoading = false
             isPlayerPlaying = true
             isPlayerEnded = false
+            clearTerminalErrorAfterVerifiedRecovery()
         case .paused:
             isPlayerLoading = false
             isPlayerPlaying = false
@@ -3265,6 +3304,17 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             }
         }
         refreshClock()
+    }
+
+    @discardableResult
+    func clearTerminalErrorAfterVerifiedRecovery() -> Bool {
+        guard case .playing = engine.playbackPhase,
+              isPlayerPlaying,
+              !isPlayerLoading,
+              engine.hasFirstFrameReadyForDisplay || engine.isTransportPlaying else { return false }
+        currentErrorMessage = ""
+        didReportTerminalError = false
+        return true
     }
 
     private func refreshClock() {
@@ -3483,11 +3533,10 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         resetAISubtitleStartupHold()
         loadGeneration = generation
         let isRemote = PlaybackBackendPolicy.isRemoteHTTP(request.videoURL.absoluteString)
-        // The hybrid cache is a local HTTP range server. It can keep one
-        // pull-driven response open, which avoids AVIOReader tearing down and
-        // re-opening a range request every 8–16 MB on large remote files.
-        // Do not enable this for arbitrary HTTP origins: the held transport is
-        // intentionally limited to the cache server's HTTP/1.1 loopback path.
+        // The hybrid cache is a local HTTP range server on 127.0.0.1.
+        // Holding the source connection open (AE#377) avoids AVIOReader repeatedly
+        // terminating and renegotiating range requests every 8–16 MB, preventing
+        // CDN rate-limiting/throttling on both loopback and direct remote streams.
         let isLocalPlaybackCache = request.videoURL.host == "127.0.0.1"
             && request.videoURL.path.hasPrefix("/stream/")
         self.isRemoteStream = isRemote || isLocalPlaybackCache
@@ -3588,7 +3637,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             preserveASSMarkup: true,
             prepareNativeSubtitles: false,
             maxConcurrentSourceRequests: isRemote ? 1 : nil,
-            heldSourceConnection: isLocalPlaybackCache,
+            heldSourceConnection: isLocalPlaybackCache || isRemote,
             preferredAudioLanguages: request.preferredAudioLanguages,
             preferredSubtitleLanguages: request.preferredSubtitleLanguages,
             externalSubtitles: externalRegistration.tracks,

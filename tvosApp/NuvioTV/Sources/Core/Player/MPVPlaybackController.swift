@@ -461,6 +461,16 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     let subtitleTranslationState = MPVSubtitleTranslationState()
     private var isMPVSubtitleRendererHiddenForTranslation = false
 
+    var currentSubtitleText: String? {
+        if let subText = getString("sub-text"), !subText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return subText
+        }
+        if !subtitleTranslationState.sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return subtitleTranslationState.sourceText
+        }
+        return nil
+    }
+
     // Cached track lists
     var audioTracks: [PlaybackTrackInfo] = []
     var subtitleTracks: [PlaybackTrackInfo] = []
@@ -468,6 +478,9 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     // State (polled from the view model every 250ms)
     var onFirstFrameReady: (() -> Void)?
     var isPlayerLoading: Bool = true
+    var loadingStepMessage: String? {
+        isPlayerLoading ? L10n.string("player_loading_buffering", fallback: "Buffering…") : nil
+    }
     var isPlayerPlaying: Bool = false
     var isTransportPlaying: Bool { isPlayerPlaying }
     var isPlayerEnded: Bool = false
@@ -1217,6 +1230,24 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         guard mpv != nil else { return }
         var value = pow(10.0, dB / 20.0) * 100.0
         mpv_set_property(mpv, "volume", MPV_FORMAT_DOUBLE, &value)
+    }
+
+    func setAudioProcessing(dialogue: EnhanceDialogueMode, reduceLoud: Bool) {
+        guard let mpv else { return }
+        var filters: [String] = []
+        switch dialogue {
+        case .off:
+            break
+        case .enhance:
+            filters.append("lavfi=[dynaudnorm=f=150:g=15:m=10.0]")
+        case .boost:
+            filters.append("lavfi=[dynaudnorm=f=100:g=21:m=20.0],equalizer=f=1500:width_type=o:width=1.5:g=8")
+        }
+        if reduceLoud {
+            filters.append("lavfi=[acompressor=threshold=-20dB:ratio=4:attack=50:release=1000]")
+        }
+        let filterString = filters.joined(separator: ",")
+        mpv_set_property_string(mpv, "af", filterString)
     }
 
     // MARK: - Track selection

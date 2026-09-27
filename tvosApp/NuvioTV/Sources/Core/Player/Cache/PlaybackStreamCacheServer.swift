@@ -411,6 +411,10 @@ actor PlaybackStreamCacheServer {
     private var acceptTask: Task<Void, Never>?
     private var forwardFillTask: Task<Void, Never>?
     private var archiveTask: Task<Void, Never>?
+    private var archiveScanCursor: Int?
+    private var seekGeneration: UInt64 = 0
+    private var forwardPrefixAuditCursor = 0
+    private var lastForwardPrefixAuditUptime: TimeInterval = 0
     private var inFlightBatchFetches: [Int: (batch: PlaybackStreamSharedBatch, task: Task<Bool, Never>)] = [:]
     private struct InFlightDemandFetch {
         let id: UUID
@@ -520,9 +524,16 @@ actor PlaybackStreamCacheServer {
             self.durationSeconds = durationSeconds
         }
         if isSeek {
+            seekGeneration &+= 1
             cancelObsoletePrefetch()
             clientReadGeneration &+= 1
             clientReadOffset = playheadOffset
+            let total = diskCache.totalChunks
+            archiveScanCursor = total > 0
+                ? min(max(0, diskCache.chunkIndex(forByteOffset: playheadOffset)), total - 1)
+                : nil
+            forwardPrefixAuditCursor = archiveScanCursor ?? 0
+            lastForwardPrefixAuditUptime = 0
         }
         playerPlayheadOffset = playheadOffset
     }
@@ -771,18 +782,33 @@ actor PlaybackStreamCacheServer {
         guard !diskWriteCoolingDown else { return false }
         guard pendingWrites.count < Self.maxBatchChunks * 4 else { return false }
         checkThrottleRecovery()
+        let currentSeekGeneration = seekGeneration
         let playhead = effectiveAnchorOffset
         let totalLen = diskCache.fileLength
         guard totalLen > 0 else { return false }
 
-        let leadAhead = await diskCache.contiguousCachedBytesAhead(of: playhead)
+        var leadAhead = await diskCache.contiguousCachedBytesAhead(of: playhead)
+        guard currentSeekGeneration == seekGeneration else { return false }
+
+        let startChunk = diskCache.chunkIndex(forByteOffset: playhead)
+        let contiguousChunkCount = Int(leadAhead / diskCache.chunkSize)
+        let foundStaleChunk = await auditForwardCachedPrefix(
+            startingAt: startChunk,
+            chunkCount: contiguousChunkCount,
+            seekGeneration: currentSeekGeneration
+        )
+        guard currentSeekGeneration == seekGeneration else { return false }
+        if foundStaleChunk {
+            leadAhead = await diskCache.contiguousCachedBytesAhead(of: playhead)
+            guard currentSeekGeneration == seekGeneration else { return false }
+        }
+
         let bursting = leadAhead < burstTargetBytes
         let targetLead = bursting ? max(burstTargetBytes, adaptiveForwardLeadBytes) : adaptiveForwardLeadBytes
         let isUrgent = leadAhead < targetLead
 
         guard isUrgent else { return false }
 
-        let startChunk = diskCache.chunkIndex(forByteOffset: playhead)
         let endOffset = min(playhead + targetLead, totalLen - 1)
         let endChunk = diskCache.chunkIndex(forByteOffset: endOffset)
 
@@ -793,19 +819,26 @@ actor PlaybackStreamCacheServer {
         let availableSlots = max(0, allowedConcurrency - activeUpstreamFetches - queuedDemandWaiters - (maxConcurrentUpstream <= 1 ? activeDemandFetches : 0))
         guard availableSlots > 0 else { return isUrgent }
 
+        let firstMissingChunk = startChunk + Int(leadAhead / diskCache.chunkSize)
         var dispatched = 0
-        var chunk = startChunk
+        var chunk = min(endChunk + 1, firstMissingChunk)
         while chunk <= endChunk && dispatched < availableSlots {
             if Task.isCancelled { break }
             let isCached = await diskCache.isChunkCached(chunk)
+            guard currentSeekGeneration == seekGeneration else { return dispatched > 0 }
             if !isCached && inFlightDemandFetches[chunk] == nil && inFlightBatchFetches[chunk] == nil {
-                guard await diskCache.canPrefetchChunk(chunk, playheadOffset: playhead, evictBehindPlayhead: true) else {
-                    break
-                }
+                let canPrefetch = await diskCache.canPrefetchChunk(
+                    chunk, playheadOffset: playhead, evictBehindPlayhead: true
+                )
+                guard currentSeekGeneration == seekGeneration else { return dispatched > 0 }
+                guard canPrefetch else { break }
+
                 var batchCount = 1
                 while batchCount < Self.maxBatchChunks && (chunk + batchCount) <= endChunk {
                     let next = chunk + batchCount
-                    if await diskCache.isChunkCached(next) || inFlightDemandFetches[next] != nil || inFlightBatchFetches[next] != nil { break }
+                    let nextIsCached = await diskCache.isChunkCached(next)
+                    guard currentSeekGeneration == seekGeneration else { return dispatched > 0 }
+                    if nextIsCached || inFlightDemandFetches[next] != nil || inFlightBatchFetches[next] != nil { break }
                     batchCount += 1
                 }
                 dispatchBatchFetch(startingAt: chunk, count: batchCount, priority: .forward)
@@ -818,19 +851,52 @@ actor PlaybackStreamCacheServer {
         return isUrgent
     }
 
+    /// Validates a small rotating slice of the contiguous cached prefix so deleted
+    /// chunk files eventually become visible without checking the whole prefix per poll.
+    private func auditForwardCachedPrefix(
+        startingAt startChunk: Int, chunkCount: Int, seekGeneration: UInt64
+    ) async -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard chunkCount > 0, now - lastForwardPrefixAuditUptime >= 0.1 else { return false }
+        lastForwardPrefixAuditUptime = now
+
+        let cursorOffset = forwardPrefixAuditCursor >= startChunk &&
+            forwardPrefixAuditCursor < startChunk + chunkCount
+            ? forwardPrefixAuditCursor - startChunk
+            : 0
+        let auditCount = min(8, chunkCount)
+        var foundStaleChunk = false
+        for offset in 0..<auditCount {
+            let index = startChunk + (cursorOffset + offset) % chunkCount
+            let isCached = await diskCache.isChunkCached(index)
+            guard seekGeneration == self.seekGeneration else { return false }
+            if !isCached { foundStaleChunk = true }
+        }
+
+        guard seekGeneration == self.seekGeneration else { return false }
+        forwardPrefixAuditCursor = startChunk + (cursorOffset + auditCount) % chunkCount
+        return foundStaleChunk
+    }
+
     /// Dispatches background archive chunks from 0 to EOF once forward fill is healthy.
     @discardableResult
     private func performArchiveStep() async -> Bool {
+        let thermalState = ProcessInfo.processInfo.thermalState
+        guard thermalState != .serious && thermalState != .critical else { return false }
         guard !diskWriteCoolingDown else { return false }
         guard pendingWrites.count < Self.maxBatchChunks * 4 else { return false }
         guard !isThrottled else { return false }
+        let archiveBatchInFlight = inFlightBatchFetches.values.contains { $0.batch.priority == .archive }
+        guard !archiveBatchInFlight else { return false }
 
         let total = diskCache.totalChunks
         guard total > 0 else { return false }
 
         // Protect Tier 2: Only archive if Forward Fill already satisfies target lead
+        let currentSeekGeneration = seekGeneration
         let playhead = effectiveAnchorOffset
         let leadAhead = await diskCache.contiguousCachedBytesAhead(of: playhead)
+        guard currentSeekGeneration == seekGeneration else { return false }
         let bursting = leadAhead < burstTargetBytes
         guard !bursting else { return false } // Yield completely to opening burst
 
@@ -840,52 +906,52 @@ actor PlaybackStreamCacheServer {
         }
 
         // Dedicated archive slots (leaving at least 1 slot for demand/forward fill)
-        let archiveSlots = max(0, maxConcurrentUpstream - activeUpstreamFetches - 1)
+        let archiveSlots = min(1, max(0, maxConcurrentUpstream - activeUpstreamFetches - 1))
         guard archiveSlots > 0 else { return false }
 
         var dispatched = 0
-        let startChunk = diskCache.chunkIndex(forByteOffset: playhead)
-        var chunk = startChunk
-        while chunk < total && dispatched < archiveSlots {
+        let playheadChunk = diskCache.chunkIndex(forByteOffset: playhead)
+        var scanCursor = min(max(0, archiveScanCursor ?? playheadChunk), total - 1)
+        archiveScanCursor = scanCursor
+        var scannedChunks = 0
+        let scanLimit = min(total, max(32, archiveSlots * Self.maxBatchChunks * 8))
+        while scannedChunks < scanLimit && dispatched < archiveSlots {
             if Task.isCancelled { return dispatched > 0 }
+            let chunk = scanCursor
             let isCached = await diskCache.isChunkCached(chunk)
-            if !isCached && inFlightDemandFetches[chunk] == nil && inFlightBatchFetches[chunk] == nil,
-               await diskCache.canPrefetchChunk(chunk, playheadOffset: playhead, evictBehindPlayhead: false) {
-                var batchCount = 1
-                while batchCount < Self.maxBatchChunks && (chunk + batchCount) < total {
-                    let next = chunk + batchCount
-                    if await diskCache.isChunkCached(next) || inFlightDemandFetches[next] != nil || inFlightBatchFetches[next] != nil { break }
-                    batchCount += 1
-                }
-                dispatchBatchFetch(startingAt: chunk, count: batchCount, priority: .archive)
-                dispatched += 1
-                chunk += batchCount
-            } else {
-                chunk += 1
+            guard currentSeekGeneration == seekGeneration else { return dispatched > 0 }
+            if isCached || inFlightDemandFetches[chunk] != nil || inFlightBatchFetches[chunk] != nil {
+                scanCursor = (chunk + 1) % total
+                archiveScanCursor = scanCursor
+                scannedChunks += 1
+                continue
             }
-        }
 
-        // If from playhead to end is complete, fill from 0 to playhead as well
-        if chunk >= total && startChunk > 0 && dispatched < archiveSlots {
-            var wrapChunk = 0
-            while wrapChunk < startChunk && dispatched < archiveSlots {
-                if Task.isCancelled { return dispatched > 0 }
-                let isCached = await diskCache.isChunkCached(wrapChunk)
-                if !isCached && inFlightDemandFetches[wrapChunk] == nil && inFlightBatchFetches[wrapChunk] == nil,
-                   await diskCache.canPrefetchChunk(wrapChunk, playheadOffset: playhead, evictBehindPlayhead: false) {
-                    var batchCount = 1
-                    while batchCount < Self.maxBatchChunks && (wrapChunk + batchCount) < startChunk {
-                        let next = wrapChunk + batchCount
-                        if await diskCache.isChunkCached(next) || inFlightDemandFetches[next] != nil || inFlightBatchFetches[next] != nil { break }
-                        batchCount += 1
-                    }
-                    dispatchBatchFetch(startingAt: wrapChunk, count: batchCount, priority: .archive)
-                    dispatched += 1
-                    wrapChunk += batchCount
-                } else {
-                    wrapChunk += 1
-                }
+            let canPrefetch = await diskCache.canPrefetchChunk(
+                chunk, playheadOffset: playhead, evictBehindPlayhead: false
+            )
+            guard currentSeekGeneration == seekGeneration else { return dispatched > 0 }
+            if !canPrefetch {
+                // Try other candidates within the bounded scan before yielding.
+                scanCursor = (chunk + 1) % total
+                archiveScanCursor = scanCursor
+                scannedChunks += 1
+                continue
             }
+
+            var batchCount = 1
+            while batchCount < Self.maxBatchChunks && (chunk + batchCount) < total {
+                let next = chunk + batchCount
+                let nextIsCached = await diskCache.isChunkCached(next)
+                guard currentSeekGeneration == seekGeneration else { return dispatched > 0 }
+                if nextIsCached || inFlightDemandFetches[next] != nil || inFlightBatchFetches[next] != nil { break }
+                batchCount += 1
+            }
+            dispatchBatchFetch(startingAt: chunk, count: batchCount, priority: .archive)
+            dispatched += 1
+            scannedChunks += batchCount
+            scanCursor = (chunk + batchCount) % total
+            archiveScanCursor = scanCursor
         }
 
         return dispatched > 0

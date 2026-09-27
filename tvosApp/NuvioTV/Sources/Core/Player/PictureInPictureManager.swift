@@ -19,6 +19,9 @@ struct ActivePlaybackContext: Equatable {
     let autoPlayNextEnabled: Bool
     let autoPlayNextCountdownSeconds: Int
     let playbackOrigin: PlaybackOrigin
+    let filename: String?
+    let videoSize: Int64?
+    let videoHash: String?
 
     init(
         url: URL,
@@ -32,7 +35,10 @@ struct ActivePlaybackContext: Equatable {
         currentEpisode: NuvioVideo? = nil,
         autoPlayNextEnabled: Bool = true,
         autoPlayNextCountdownSeconds: Int = 10,
-        playbackOrigin: PlaybackOrigin = .main
+        playbackOrigin: PlaybackOrigin = .main,
+        filename: String? = nil,
+        videoSize: Int64? = nil,
+        videoHash: String? = nil
     ) {
         self.url = url
         self.meta = meta
@@ -46,6 +52,9 @@ struct ActivePlaybackContext: Equatable {
         self.autoPlayNextEnabled = autoPlayNextEnabled
         self.autoPlayNextCountdownSeconds = autoPlayNextCountdownSeconds
         self.playbackOrigin = playbackOrigin
+        self.filename = filename
+        self.videoSize = videoSize
+        self.videoHash = videoHash
     }
 }
 

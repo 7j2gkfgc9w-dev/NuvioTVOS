@@ -43,6 +43,13 @@ final class PlaybackSessionCoordinator: ObservableObject {
         }
     }
 
+    var loadingStepMessage: String? {
+        if let statusToast, !statusToast.isEmpty {
+            return statusToast
+        }
+        return activeEngine.loadingStepMessage
+    }
+
     init(
         aetherController: AetherPlaybackController? = nil,
         aetherControllerFactory: @escaping @MainActor () -> AetherPlaybackController? = { AetherPlaybackController() },
@@ -85,6 +92,7 @@ final class PlaybackSessionCoordinator: ObservableObject {
         currentURLString = request.videoURL.absoluteString
         statusToast = nil
         loadGeneration &+= 1
+        bindAetherCallbacks()
 
         let storedEngine = engineSettingProvider()
         let migratedEngine = PlayerEngineSetting.migrated(from: storedEngine)
@@ -152,6 +160,14 @@ final class PlaybackSessionCoordinator: ObservableObject {
         onAetherControllerChanged?(aetherController)
         statusToast = nil
         load(lastRequest, requiresMPVAudioControls: lastRequiresMPVAudioControls)
+    }
+
+    /// Clears a latched startup error only for the load that has verified recovery.
+    @discardableResult
+    func clearLoadErrorAfterVerifiedRecovery(generation: UInt64) -> Bool {
+        guard loadGeneration == generation, lastLoadError != nil else { return false }
+        lastLoadError = nil
+        return true
     }
 
     /// Explicit Aether → MPV handoff (audio delay / amplification / terminal error).
@@ -243,8 +259,11 @@ final class PlaybackSessionCoordinator: ObservableObject {
 
     private func bindAetherCallbacks() {
         guard let controller = aetherController else { return }
+        let generation = loadGeneration
         controller.onTerminalError = { [weak self, weak controller] message in
-            guard let self, let controller, self.aetherController === controller else { return }
+            guard let self, let controller,
+                  self.aetherController === controller,
+                  self.loadGeneration == generation else { return }
             self.handleAetherTerminalError(message)
         }
     }
@@ -292,33 +311,8 @@ final class PlaybackSessionCoordinator: ObservableObject {
             return
         }
 
-        let isDiskCacheEnabled = (ProfileSettings.current.object(forKey: SettingsKey.hybridDiskCacheEnabled) as? Bool) ?? true
-        let isHTTP = PlaybackBackendPolicy.isRemoteHTTP(request.videoURL.absoluteString)
-        let isHLS = request.videoURL.pathExtension.lowercased() == "m3u8"
-
-        if isDiskCacheEnabled && isHTTP && !isHLS {
-            Task { @MainActor [weak self] in
-                guard let self, !self.userStopped, self.loadGeneration == generation else { return }
-                var effectiveRequest = request
-                if let localURL = await PlaybackStreamCacheManager.shared.prepareCacheServer(
-                    for: request.videoURL,
-                    headers: request.httpHeaders,
-                    canonicalMediaKey: request.canonicalMediaKey,
-                    cacheFileIdentity: request.cacheFileIdentity,
-                    filename: request.filename,
-                    targetLeadSeconds: request.cacheProfile.hybridCacheTargetLeadSeconds
-                ) {
-                    effectiveRequest.videoURL = localURL
-                }
-                guard !self.userStopped, self.loadGeneration == generation else {
-                    await PlaybackStreamCacheManager.shared.stopActiveSession()
-                    return
-                }
-                self.dispatchToEngine(effectiveRequest, on: backend, generation: generation)
-            }
-        } else {
-            dispatchToEngine(request, on: backend, generation: generation)
-        }
+        // Hybrid disk cache disabled: dispatch directly to the playback engine.
+        dispatchToEngine(request, on: backend, generation: generation)
     }
 
     private func dispatchToEngine(_ request: PlaybackLoadRequest, on backend: PlayerBackendKind, generation: UInt64) {
@@ -363,6 +357,7 @@ private final class UnavailablePlaybackEngine: PlaybackEngineControlling {
     var currentErrorMessage = ""
     let videoFrameSize = CGSize.zero
     var playbackDebugInfo: PlaybackDebugInfo { PlaybackDebugInfo(player: "Unavailable") }
+    var loadingStepMessage: String? { nil }
     func loadFile(_ urlString: String) {}
     func playPlayback() {}
     func pausePlayback() {}

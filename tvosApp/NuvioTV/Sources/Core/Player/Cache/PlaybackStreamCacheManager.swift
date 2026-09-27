@@ -288,6 +288,10 @@ actor PlaybackStreamCacheManager {
     private var activeServer: PlaybackStreamCacheServer?
     private var activeSessionURL: URL?
 
+    var hasActiveServer: Bool {
+        activeServer != nil
+    }
+
     private init() {}
 
     /// Checks if a remote stream supports HTTP Range requests and resolves its total file length and HTTP validators.

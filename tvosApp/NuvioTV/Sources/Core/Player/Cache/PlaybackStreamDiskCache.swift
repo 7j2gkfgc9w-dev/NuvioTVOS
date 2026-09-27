@@ -240,6 +240,10 @@ actor PlaybackStreamDiskCache {
             }
         }
 
+        if currentCachedBytes + chunkBytes <= maxCacheSizeBytes {
+            return true
+        }
+
         let reclaimable = evictBehindPlayhead ? cachedChunkIndices.reduce(Int64(0)) { bytes, chunk in
             bytes + (chunk < playheadChunk ? Int64(byteRange(forChunk: chunk).count) : 0)
         } : 0

@@ -192,6 +192,7 @@ protocol PlaybackEngineControlling: AnyObject {
     var currentErrorMessage: String { get }
     var videoFrameSize: CGSize { get }
     var playbackDebugInfo: PlaybackDebugInfo { get }
+    var loadingStepMessage: String? { get }
 
     func loadFile(_ urlString: String)
     func playPlayback()
@@ -202,6 +203,7 @@ protocol PlaybackEngineControlling: AnyObject {
     func setSubtitleDelay(_ seconds: Double)
     func setAudioDelay(_ seconds: Double)
     func setAudioVolumeGain(dB: Double)
+    func setAudioProcessing(dialogue: EnhanceDialogueMode, reduceLoud: Bool)
     func selectAudio(_ trackId: Int)
     func selectSubtitle(_ trackId: Int)
     func addSubtitle(_ subtitle: NuvioSubtitle, select: Bool)
@@ -209,6 +211,10 @@ protocol PlaybackEngineControlling: AnyObject {
     func applySubtitleStyle()
     func destroyPlayer()
     func refreshPlaybackState()
+}
+
+extension PlaybackEngineControlling {
+    func setAudioProcessing(dialogue: EnhanceDialogueMode, reduceLoud: Bool) {}
 }
 
 enum PlaybackToggleDirection: Equatable {

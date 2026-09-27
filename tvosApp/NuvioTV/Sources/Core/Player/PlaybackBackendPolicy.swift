@@ -1,7 +1,7 @@
 import Foundation
 
 /// Playback backends after the AetherEngine migration.
-enum PlayerBackendKind: String, Equatable {
+enum PlayerBackendKind: String, Equatable, Sendable {
     case aether
     case mpv
 }

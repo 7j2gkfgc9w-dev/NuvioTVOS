@@ -85,7 +85,6 @@ private final class MPVStreamSession: NSObject, URLSessionDataDelegate, @uncheck
     private var totalSize: Int64 = -1
     private var currentPosition: Int64 = 0
     private var requestedOffset: Int64 = 0
-    private var requestedEnd: Int64 = 0
     private var buffer = Data()
     private var isEOF = false
     private var isCancelled = false
@@ -93,10 +92,9 @@ private final class MPVStreamSession: NSObject, URLSessionDataDelegate, @uncheck
     private var isTaskSuspended = false
     private var taskError: Error?
     private var consecutiveReadFailures = 0
-    private let rangeRequestBytes: Int64 = 16 * 1024 * 1024
 
-    private let maxBufferSize = 32 * 1024 * 1024 // 32 MB buffer cap
-    private let resumeBufferSize = 16 * 1024 * 1024 // 16 MB resume threshold
+    private let maxBufferSize = 64 * 1024 * 1024 // 64 MB buffer cap
+    private let resumeBufferSize = 32 * 1024 * 1024 // 32 MB resume threshold
 
     init?(url: URL, headers: [String: String]) {
         self.url = url
@@ -143,6 +141,14 @@ private final class MPVStreamSession: NSObject, URLSessionDataDelegate, @uncheck
             return offset
         }
 
+        // Fast forward seek if the requested offset is already inside our in-memory buffer
+        let forwardDelta = offset - currentPosition
+        if forwardDelta > 0 && forwardDelta < Int64(buffer.count) {
+            buffer.removeSubrange(0..<Int(forwardDelta))
+            currentPosition = offset
+            return currentPosition
+        }
+
         // Restart data task from the new target offset
         isEOF = false
         taskError = nil
@@ -187,22 +193,47 @@ private final class MPVStreamSession: NSObject, URLSessionDataDelegate, @uncheck
             }
 
             if isEOF {
-                if totalSize >= 0 && currentPosition < totalSize {
-                    isEOF = false
-                    startRangeRequest(from: currentPosition)
-                    continue
+                if totalSize > 0 && currentPosition < totalSize {
+                    // Server closed the stream before delivering the full file (e.g. idle socket drop).
+                    // Reconnect automatically from currentPosition.
+                    if consecutiveReadFailures < 5 {
+                        consecutiveReadFailures += 1
+                        isEOF = false
+                        startRangeRequest(from: currentPosition)
+                        continue
+                    }
                 }
                 return 0 // Clean EOF
             }
 
             if let error = taskError {
                 let nsError = error as NSError
-                if nsError.domain == NSURLErrorDomain,
-                   (nsError.code == NSURLErrorNetworkConnectionLost || nsError.code == NSURLErrorTimedOut),
-                   consecutiveReadFailures < 3,
-                   (totalSize < 0 || currentPosition < totalSize) {
+                let isTransientNetworkError = nsError.domain == NSURLErrorDomain && (
+                    nsError.code == NSURLErrorNetworkConnectionLost ||
+                    nsError.code == NSURLErrorTimedOut ||
+                    nsError.code == NSURLErrorCannotConnectToHost ||
+                    nsError.code == NSURLErrorCannotFindHost ||
+                    nsError.code == NSURLErrorDNSLookupFailed ||
+                    nsError.code == NSURLErrorResourceUnavailable
+                )
+                let isTransientHTTPError = nsError.domain == "HTTPError" && (
+                    nsError.code == 429 || // Too Many Requests (Rate limit)
+                    nsError.code == 500 ||
+                    nsError.code == 502 ||
+                    nsError.code == 503 || // Service Unavailable
+                    nsError.code == 504    // Gateway Timeout
+                )
+
+                if (isTransientNetworkError || isTransientHTTPError),
+                   consecutiveReadFailures < 5,
+                   (totalSize <= 0 || currentPosition < totalSize) {
                     consecutiveReadFailures += 1
                     taskError = nil
+                    isEOF = false
+
+                    let backoff = isTransientHTTPError ? min(Double(consecutiveReadFailures) * 0.5, 2.0) : 0.2
+                    condition.wait(until: Date().addingTimeInterval(backoff))
+
                     startRangeRequest(from: currentPosition)
                     continue
                 }
@@ -268,11 +299,10 @@ private final class MPVStreamSession: NSObject, URLSessionDataDelegate, @uncheck
         if request.value(forHTTPHeaderField: "User-Agent") == nil {
             request.setValue("NuvioTV/MPVKit", forHTTPHeaderField: "User-Agent")
         }
-        let rangeEnd = offset > Int64.max - rangeRequestBytes ? Int64.max : offset + rangeRequestBytes - 1
-        let end = min(totalSize > 0 ? totalSize - 1 : Int64.max, rangeEnd)
         requestedOffset = offset
-        requestedEnd = end
-        request.setValue("bytes=\(offset)-\(end)", forHTTPHeaderField: "Range")
+        // Request open-ended stream from the given offset to end of file, avoiding
+        // repetitive TCP connection teardown and origin rate-limiting.
+        request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
 
         let task = urlSession.dataTask(with: request)
         self.dataTask = task
@@ -308,21 +338,25 @@ private final class MPVStreamSession: NSObject, URLSessionDataDelegate, @uncheck
             }
 
             if status == 206 {
-                // A bounded response's Content-Length is only this range's size.
-                // Treating it as the file size would silently stop after 16 MiB.
-                let parts = httpResponse.value(forHTTPHeaderField: "Content-Range")?
-                    .split(whereSeparator: { $0 == " " || $0 == "-" || $0 == "/" })
-                guard let parts, parts.count == 4, parts[0].lowercased() == "bytes",
-                      let start = Int64(parts[1]), let end = Int64(parts[2]),
-                      let size = Int64(parts[3]), size > 0,
-                      start == requestedOffset, end >= start, end <= requestedEnd, end < size,
-                      totalSize < 0 || totalSize == size else {
-                    taskError = NSError(domain: "HTTPError", code: status,
-                                        userInfo: [NSLocalizedDescriptionKey: "Invalid Content-Range response"])
-                    completionHandler(.cancel)
-                    return
+                if let contentRangeHeader = httpResponse.value(forHTTPHeaderField: "Content-Range"),
+                   let parsedRange = PlaybackStreamCacheContentRange.parse(contentRangeHeader) {
+                    if parsedRange.start == requestedOffset {
+                        if let total = parsedRange.total {
+                            totalSize = total
+                        }
+                    } else {
+                        taskError = NSError(domain: "HTTPError", code: status,
+                                            userInfo: [NSLocalizedDescriptionKey: "Unexpected Content-Range start \(parsedRange.start) != \(requestedOffset)"])
+                        completionHandler(.cancel)
+                        return
+                    }
+                } else if let contentRange = httpResponse.allHeaderFields["Content-Range"] as? String ?? httpResponse.allHeaderFields["content-range"] as? String,
+                          let slashIndex = contentRange.lastIndex(of: "/") {
+                    let totalStr = String(contentRange[contentRange.index(after: slashIndex)...]).trimmingCharacters(in: .whitespaces)
+                    if let size = Int64(totalStr), size > 0 {
+                        totalSize = size
+                    }
                 }
-                totalSize = size
             } else if status == 200 && httpResponse.expectedContentLength > 0 {
                 totalSize = httpResponse.expectedContentLength
             }
