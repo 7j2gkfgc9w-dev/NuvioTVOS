@@ -807,19 +807,29 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// segment the cache had deleted, and live has no `restartHandler` to re-produce it. The budget
     /// is exactly the mechanism that keeps that history resident, so live gets it too.
     ///
-    /// `capRelaxed` (#207) drops the 2 GiB default for a host that explicitly asked to pre-buffer more
+    #if os(tvOS)
+    /// 384 MiB on tvOS: bounds segment retention to ~45 4K segments (~3 minutes backward history).
+    /// Prevents exhausting the Apple TV's 4 GB unified memory when videocodecd allocates ~1.5 GB
+    /// for decoded 4K frames, staying comfortably below the system ~1.5 GB Jetsam threshold.
+    static let defaultRetentionBudgetCap = 384 << 20
+    /// Largest forward window the default retention budget covers by construction.
+    static let defaultRetentionCapWindowCeiling = 45
+    #else
+    /// Largest forward window the default 2 GiB retention budget covers by construction
+    /// (150 segments x ~10 MB for 4K HEVC ~ 1.5 GB), i.e. the old `clampedForwardWindow` ceiling.
+    static let defaultRetentionBudgetCap = 2 << 30
+    static let defaultRetentionCapWindowCeiling = 150
+    #endif
+
+    /// `capRelaxed` (#207) drops the default cap for a host that explicitly asked to pre-buffer more
     /// than the historical window could hold; the quarter-of-free-space clamp, which is what actually
     /// protects the volume, always applies. Unknown capacity keeps the conservative cap either way.
     static func sessionRetentionBudgetBytes(volumeAvailableBytes: Int64?, capRelaxed: Bool = false) -> Int {
-        let cap = 2 << 30
+        let cap = defaultRetentionBudgetCap
         guard let available = volumeAvailableBytes else { return cap }
         let quarterOfFree = max(0, Int(available / 4))
         return capRelaxed ? quarterOfFree : min(cap, quarterOfFree)
     }
-
-    /// Largest forward window the default 2 GiB retention budget covers by construction
-    /// (150 segments x ~10 MB for 4K HEVC ~ 1.5 GB), i.e. the old `clampedForwardWindow` ceiling.
-    static let defaultRetentionCapWindowCeiling = 150
 
     /// #207: a window past `defaultRetentionCapWindowCeiling` is an explicit host opt-in into a
     /// whole-source prefetch, so the budget follows it up (see `sessionRetentionBudgetBytes`).
@@ -1989,7 +1999,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             builtInPanelEngagesOnDemand: Self.builtInPanelEngagesOnDemand,
             frameRateKnown: frameRate != nil,
             videoCodecNeedsMasterSignaling: videoCodecNeedsMasterSignaling,
-            hasAudioRendition: servedAudioLanguage != nil)
+            hasAudioRendition: servedAudioLanguage != nil,
+            dvVariant: dvVariant)
         let resolvedURL: URL? = useMasterPlaylist
             ? srv.playlistURL
             : srv.mediaPlaylistURL
@@ -2092,8 +2103,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
         builtInPanelEngagesOnDemand: Bool,
         frameRateKnown: Bool,
         videoCodecNeedsMasterSignaling: Bool = false,
-        hasAudioRendition: Bool = false
+        hasAudioRendition: Bool = false,
+        dvVariant: DVVariant = .none
     ) -> Bool {
+        // DV Profile 5 and AV1 Profile 10 have no backward-compatible base layer (IPT-PQ only, no
+        // fallback track). On a display without Dolby Vision capability (effectiveDvMode == false),
+        // AVPlayer's external-display variant validator rejects a master advertising dvh1.05 with
+        // AVFoundationErrorDomain -11868 (AVErrorNoCompatibleAlternatesForExternalDisplay), failing
+        // the item before any segment fetch. Routing media-direct bypasses variant filtering,
+        // allowing AVPlayer's VideoToolbox DV decoder to tonemap IPT-PQ to HDR10/PQ or SDR.
+        if !effectiveDvMode && (dvVariant == .profile5 || dvVariant == .av1Profile10) {
+            return false
+        }
         let sourceIsHDR = videoRange != .sdr || effectiveDvMode
         let panelReadyForHDR = panelIsInHDRMode
             || (builtInPanelEngagesOnDemand && displaySupportsHDR)

@@ -13,6 +13,12 @@ public struct AudioTapBuffer: @unchecked Sendable {
     /// `sourceTime` (AudioTapMonotonicFilter trims sub-`overlapTrimThreshold` seam overlaps),
     /// which SpeechAnalyzer's input timeline requires.
     public let discontinuity: Bool
+
+    public init(buffer: AVAudioPCMBuffer, sourceTime: Double, discontinuity: Bool = false) {
+        self.buffer = buffer
+        self.sourceTime = sourceTime
+        self.discontinuity = discontinuity
+    }
 }
 
 public extension AetherEngine {

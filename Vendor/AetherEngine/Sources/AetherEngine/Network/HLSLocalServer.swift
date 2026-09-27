@@ -1356,6 +1356,7 @@ final class HLSLocalServer: @unchecked Sendable {
             return false
         }
         let fileFd = handle.fileDescriptor
+        _ = fcntl(fileFd, F_NOCACHE, 1)
         defer { try? handle.close() }
 
         let chunkSize = 256 * 1024
