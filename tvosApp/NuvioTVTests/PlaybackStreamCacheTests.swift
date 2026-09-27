@@ -737,6 +737,138 @@ extension PlaybackStreamCacheTests {
         await server.stop()
     }
 
+    func testForwardAuditRefetchesExternallyRemovedChunkAfterLeadIsSatisfied() async throws {
+        let chunkSize = Int(PlaybackStreamDiskCache.defaultChunkSize)
+        let fileLength = Int64(chunkSize * 44)
+        let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sessionID = "forward_stale_chunk_\(UUID().uuidString)"
+        let freeSpaceProvider: PlaybackStreamDiskCache.FreeSpaceProvider = { _ in Int64.max }
+        defer {
+            PlaybackStreamCacheURLProtocol.handler = nil
+            try? FileManager.default.removeItem(at: cacheRoot)
+        }
+
+        let seedCache = PlaybackStreamDiskCache(
+            sessionID: sessionID,
+            fileLength: fileLength,
+            maxCacheSizeBytes: fileLength + Int64(chunkSize * 6),
+            freeSpaceReserveBytes: 0,
+            cacheRoot: cacheRoot,
+            freeSpaceProvider: freeSpaceProvider
+        )
+        let cachedChunk = Data(repeating: 0x41, count: chunkSize)
+        for index in 2..<43 {
+            await seedCache.writeChunk(index, data: cachedChunk)
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.resetMetrics()
+        let body = Data(repeating: 0x73, count: Int(fileLength))
+        PlaybackStreamCacheURLProtocol.handler = { request in
+            PlaybackStreamCacheURLProtocol.response(for: request, body: body, total: fileLength)
+        }
+        let server = PlaybackStreamCacheServer(
+            remoteURL: URL(string: "https://cache-test.invalid/stale_chunk")!,
+            fileLength: fileLength,
+            sessionID: sessionID,
+            maxDiskCacheSizeBytes: fileLength + Int64(chunkSize * 6),
+            freeSpaceReserveBytes: 0,
+            targetLeadSeconds: 10,
+            cacheRoot: cacheRoot,
+            sessionConfiguration: configuration,
+            maxConcurrentUpstream: 1,
+            freeSpaceProvider: freeSpaceProvider
+        )
+        let staleChunkURL = cacheRoot
+            .appendingPathComponent(sessionID, isDirectory: true)
+            .appendingPathComponent("chunk_10.bin")
+        try FileManager.default.removeItem(at: staleChunkURL)
+        await server.updateTimeline(
+            playheadOffset: Int64(chunkSize * 2), durationSeconds: 120, isSeek: true
+        )
+        _ = try await server.start()
+
+        let expectedRange = "bytes=\(chunkSize * 10)-\(chunkSize * 11 - 1)"
+        for _ in 0..<500 where !PlaybackStreamCacheURLProtocol.requestRanges.contains(where: { $0 == expectedRange }) {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let requestedRanges = PlaybackStreamCacheURLProtocol.requestRanges.compactMap { $0 }
+        await server.stop()
+
+        XCTAssertTrue(
+            requestedRanges.contains(expectedRange),
+            "Forward fill should audit cached files even while metadata reports enough lead"
+        )
+    }
+
+    func testArchiveScanCursorStartsAtPlayheadAndWrapsToEarlierMissingChunks() async throws {
+        let chunkSize = Int(PlaybackStreamDiskCache.defaultChunkSize)
+        let fileLength = Int64(chunkSize * 44)
+        let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sessionID = "archive_cursor_\(UUID().uuidString)"
+        let freeSpaceProvider: PlaybackStreamDiskCache.FreeSpaceProvider = { _ in Int64.max }
+        defer {
+            PlaybackStreamCacheURLProtocol.handler = nil
+            try? FileManager.default.removeItem(at: cacheRoot)
+        }
+
+        let seedCache = PlaybackStreamDiskCache(
+            sessionID: sessionID,
+            fileLength: fileLength,
+            maxCacheSizeBytes: fileLength,
+            freeSpaceReserveBytes: 0,
+            cacheRoot: cacheRoot,
+            freeSpaceProvider: freeSpaceProvider
+        )
+        let cachedChunk = Data(repeating: 0x31, count: chunkSize)
+        for index in 2..<43 {
+            await seedCache.writeChunk(index, data: cachedChunk)
+        }
+        let prefilledBytes = await seedCache.currentCachedBytes
+        XCTAssertEqual(prefilledBytes, Int64(chunkSize * 41))
+
+        let body = Data(repeating: 0x72, count: Int(fileLength))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.resetMetrics()
+        PlaybackStreamCacheURLProtocol.handler = { request in
+            PlaybackStreamCacheURLProtocol.response(for: request, body: body, total: fileLength)
+        }
+        let server = PlaybackStreamCacheServer(
+            remoteURL: URL(string: "https://cache-test.invalid/archive_cursor")!,
+            fileLength: fileLength,
+            sessionID: sessionID,
+            maxDiskCacheSizeBytes: fileLength,
+            freeSpaceReserveBytes: 0,
+            targetLeadSeconds: 10,
+            cacheRoot: cacheRoot,
+            sessionConfiguration: configuration,
+            maxConcurrentUpstream: 2,
+            freeSpaceProvider: freeSpaceProvider
+        )
+        await server.updateTimeline(
+            playheadOffset: Int64(chunkSize * 2), durationSeconds: 120, isSeek: true
+        )
+        _ = try await server.start()
+
+        for _ in 0..<500 where PlaybackStreamCacheURLProtocol.requestCount < 2 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let requestedRanges = PlaybackStreamCacheURLProtocol.requestRanges.compactMap { $0 }
+        await server.stop()
+
+        XCTAssertGreaterThanOrEqual(requestedRanges.count, 2)
+        XCTAssertEqual(
+            Array(requestedRanges.prefix(2)),
+            [
+                "bytes=\(chunkSize * 43)-\(chunkSize * 44 - 1)",
+                "bytes=0-\(chunkSize * 2 - 1)"
+            ],
+            "Archive should scan from the playhead, reach EOF, then wrap to earlier missing chunks"
+        )
+    }
+
     func testSustainedColdReadUsesSharedBatches() async throws {
         let chunk = Int(PlaybackStreamDiskCache.defaultChunkSize)
         var body = Data()

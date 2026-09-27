@@ -171,15 +171,15 @@ final class HomeLayoutSettingsTests: XCTestCase {
 
     func testClearCatalogOrder() {
         let order = ["addon_1", "addon_2"]
-        let orderData = try? JSONEncoder().encode(order)
-        ProfileSettings.current.set(orderData, forKey: SettingsKey.homeCatalogOrder)
-        ProfileSettings.current.set(orderData, forKey: SettingsKey.homeCatalogSyncedOrder)
+        let orderData = try! JSONEncoder().encode(order)
+        _ = HomeCatalogPayloadStore.write(orderData, forKey: SettingsKey.homeCatalogOrder)
+        _ = HomeCatalogPayloadStore.write(orderData, forKey: SettingsKey.homeCatalogSyncedOrder)
         ProfileSettings.current.set(orderData, forKey: SettingsKey.homeCatalogTitles)
 
         TVHomeCatalogOrder.clearOrder()
 
-        XCTAssertNil(ProfileSettings.current.data(forKey: SettingsKey.homeCatalogOrder))
-        XCTAssertNil(ProfileSettings.current.data(forKey: SettingsKey.homeCatalogSyncedOrder))
+        XCTAssertNil(HomeCatalogPayloadStore.data(forKey: SettingsKey.homeCatalogOrder))
+        XCTAssertNil(HomeCatalogPayloadStore.data(forKey: SettingsKey.homeCatalogSyncedOrder))
         XCTAssertNil(ProfileSettings.current.data(forKey: SettingsKey.homeCatalogTitles))
     }
 
@@ -192,14 +192,14 @@ final class HomeLayoutSettingsTests: XCTestCase {
 
         // Set catalog order
         let order = ["test_key"]
-        let orderData = try? JSONEncoder().encode(order)
-        ProfileSettings.current.set(orderData, forKey: SettingsKey.homeCatalogOrder)
+        let orderData = try! JSONEncoder().encode(order)
+        _ = HomeCatalogPayloadStore.write(orderData, forKey: SettingsKey.homeCatalogOrder)
 
         // Execute clearCache
         await AppCacheManager.clearCache()
 
         // Verify catalog order is wiped
-        XCTAssertNil(ProfileSettings.current.data(forKey: SettingsKey.homeCatalogOrder))
+        XCTAssertNil(HomeCatalogPayloadStore.data(forKey: SettingsKey.homeCatalogOrder))
 
         // Verify user preferences are preserved
         XCTAssertEqual(ProfileSettings.current.string(forKey: SettingsKey.bodyColor), "Charcoal")
@@ -289,8 +289,8 @@ final class HomeLayoutSettingsTests: XCTestCase {
         // Account synced order: XPerience first, then Cinemeta
         let syncedOrder = ["xperience_series_top", "com.linvo.cinemeta_movie_top"]
         let data = try! JSONEncoder().encode(syncedOrder)
-        ProfileSettings.current.set(data, forKey: SettingsKey.homeCatalogSyncedOrder)
-        ProfileSettings.current.removeObject(forKey: SettingsKey.homeCatalogOrder)
+        _ = HomeCatalogPayloadStore.write(data, forKey: SettingsKey.homeCatalogSyncedOrder)
+        HomeCatalogPayloadStore.remove(forKey: SettingsKey.homeCatalogOrder)
 
         let ordered = TVHomeCatalogOrder.apply(to: [cinemetaSection, xperienceSection])
         XCTAssertEqual(ordered.count, 2)
@@ -298,7 +298,32 @@ final class HomeLayoutSettingsTests: XCTestCase {
         XCTAssertEqual(ordered[1].id, "movie_top")
 
         // Clean up
-        ProfileSettings.current.removeObject(forKey: SettingsKey.homeCatalogSyncedOrder)
+        HomeCatalogPayloadStore.remove(forKey: SettingsKey.homeCatalogSyncedOrder)
+    }
+
+    func testDisabledAddonSourcesRemainInUserDefaults() {
+        let store = ProfileSettings.current
+        let previousIDs = store.data(forKey: SettingsKey.homeCatalogDisabledAddonIDs)
+        let previousNames = store.data(forKey: SettingsKey.homeCatalogDisabledAddonNames)
+        defer {
+            if let previousIDs {
+                store.set(previousIDs, forKey: SettingsKey.homeCatalogDisabledAddonIDs)
+            } else {
+                store.removeObject(forKey: SettingsKey.homeCatalogDisabledAddonIDs)
+            }
+            if let previousNames {
+                store.set(previousNames, forKey: SettingsKey.homeCatalogDisabledAddonNames)
+            } else {
+                store.removeObject(forKey: SettingsKey.homeCatalogDisabledAddonNames)
+            }
+        }
+
+        TVHomeCatalogOrder.setDisabledAddonSources(ids: ["test.addon"], names: ["Test Addon"])
+
+        XCTAssertEqual(TVHomeCatalogOrder.disabledAddonIDs(), ["test.addon"])
+        XCTAssertEqual(TVHomeCatalogOrder.disabledAddonNames(), ["testaddon"])
+        XCTAssertNotNil(store.data(forKey: SettingsKey.homeCatalogDisabledAddonIDs))
+        XCTAssertNotNil(store.data(forKey: SettingsKey.homeCatalogDisabledAddonNames))
     }
 
     func testMergeHomeCatalogItemsPreservesRemoteCatalogs() {
@@ -361,14 +386,18 @@ final class HomeLayoutSettingsTests: XCTestCase {
         let savedPrefs = ProfileSettings.current.string(forKey: SettingsKey.streamAddonManifestStates)
         let savedURLs = ProfileSettings.current.string(forKey: SettingsKey.streamAddonManifestURLs)
         let savedSingleURL = ProfileSettings.current.string(forKey: SettingsKey.streamAddonManifestURL)
-        let savedDisabledCatalogs = ProfileSettings.current.data(forKey: SettingsKey.homeCatalogDisabled)
+        let savedDisabledCatalogs = HomeCatalogPayloadStore.data(forKey: SettingsKey.homeCatalogDisabled)
         let savedDisabledAddons = ProfileSettings.current.data(forKey: SettingsKey.homeCatalogDisabledAddonIDs)
         let savedDisabledNames = ProfileSettings.current.data(forKey: SettingsKey.homeCatalogDisabledAddonNames)
         defer {
             ProfileSettings.current.set(savedPrefs, forKey: SettingsKey.streamAddonManifestStates)
             ProfileSettings.current.set(savedURLs, forKey: SettingsKey.streamAddonManifestURLs)
             ProfileSettings.current.set(savedSingleURL, forKey: SettingsKey.streamAddonManifestURL)
-            ProfileSettings.current.set(savedDisabledCatalogs, forKey: SettingsKey.homeCatalogDisabled)
+            if let savedDisabledCatalogs {
+                _ = HomeCatalogPayloadStore.write(savedDisabledCatalogs, forKey: SettingsKey.homeCatalogDisabled)
+            } else {
+                HomeCatalogPayloadStore.remove(forKey: SettingsKey.homeCatalogDisabled)
+            }
             ProfileSettings.current.set(savedDisabledAddons, forKey: SettingsKey.homeCatalogDisabledAddonIDs)
             ProfileSettings.current.set(savedDisabledNames, forKey: SettingsKey.homeCatalogDisabledAddonNames)
             CinemetaCatalogRepository.setCinemetaDisabled(false)
@@ -376,7 +405,7 @@ final class HomeLayoutSettingsTests: XCTestCase {
         ProfileSettings.current.removeObject(forKey: SettingsKey.streamAddonManifestStates)
         ProfileSettings.current.removeObject(forKey: SettingsKey.streamAddonManifestURLs)
         ProfileSettings.current.removeObject(forKey: SettingsKey.streamAddonManifestURL)
-        ProfileSettings.current.removeObject(forKey: SettingsKey.homeCatalogDisabled)
+        HomeCatalogPayloadStore.remove(forKey: SettingsKey.homeCatalogDisabled)
         ProfileSettings.current.removeObject(forKey: SettingsKey.homeCatalogDisabledAddonIDs)
         ProfileSettings.current.removeObject(forKey: SettingsKey.homeCatalogDisabledAddonNames)
 
@@ -585,10 +614,7 @@ final class HomeLayoutSettingsTests: XCTestCase {
         let profileId = "test_custom_titles_profile"
         // Clean up any leftover data from previous runs
         let store = ProfileSettings.store(for: profileId)
-        store.removeObject(forKey: SettingsKey.homeCatalogSyncedOrder)
-        store.removeObject(forKey: SettingsKey.homeCatalogDisabled)
-        store.removeObject(forKey: SettingsKey.homeCollectionDisabled)
-        store.removeObject(forKey: SettingsKey.homeCatalogCustomTitles)
+        HomeCatalogPayloadStore.removeAll(in: store, profileID: profileId)
         store.removeObject(forKey: SettingsKey.homeCatalogShowType)
 
         let itemDict: [String: Any] = [
@@ -607,7 +633,11 @@ final class HomeLayoutSettingsTests: XCTestCase {
         let didChange = NuvioSyncManager.applyHomeCatalogSettings(payload, localProfileId: profileId)
         XCTAssertTrue(didChange)
 
-        guard let data = store.data(forKey: SettingsKey.homeCatalogCustomTitles),
+        guard let data = HomeCatalogPayloadStore.data(
+            forKey: SettingsKey.homeCatalogCustomTitles,
+            in: store,
+            profileID: profileId
+        ),
               let titles = try? JSONDecoder().decode([String: String].self, from: data) else {
             XCTFail("Custom titles not saved to store")
             return
@@ -615,11 +645,169 @@ final class HomeLayoutSettingsTests: XCTestCase {
         XCTAssertEqual(titles["com.aio.metadata_series_top_20"], "Top 20 TV Shows of the Week")
 
         // Clean up
-        store.removeObject(forKey: SettingsKey.homeCatalogSyncedOrder)
-        store.removeObject(forKey: SettingsKey.homeCatalogDisabled)
-        store.removeObject(forKey: SettingsKey.homeCollectionDisabled)
-        store.removeObject(forKey: SettingsKey.homeCatalogCustomTitles)
+        HomeCatalogPayloadStore.removeAll(in: store, profileID: profileId)
         store.removeObject(forKey: SettingsKey.homeCatalogShowType)
+    }
+
+    func testHomeCatalogPayloadStoreMigratesLegacyDataAndIsolatesProfiles() throws {
+        let firstProfileID = "test-home-payload-first-\(UUID().uuidString)"
+        let secondProfileID = "test-home-payload-second-\(UUID().uuidString)"
+        let firstStore = ProfileSettings.store(for: firstProfileID)
+        let secondStore = ProfileSettings.store(for: secondProfileID)
+        let defaultProfileStore = ProfileSettings.store(for: "default")
+        let previousStandardOrder = HomeCatalogPayloadStore.data(forKey: SettingsKey.homeCatalogOrder, in: .standard)
+        let previousDefaultProfileOrder = HomeCatalogPayloadStore.data(
+            forKey: SettingsKey.homeCatalogOrder,
+            in: defaultProfileStore,
+            profileID: "default"
+        )
+        defer {
+            HomeCatalogPayloadStore.removeAll(in: firstStore, profileID: firstProfileID)
+            HomeCatalogPayloadStore.removeAll(in: secondStore, profileID: secondProfileID)
+            firstStore.removePersistentDomain(forName: "nuvio.tv.profile.settings.\(firstProfileID)")
+            secondStore.removePersistentDomain(forName: "nuvio.tv.profile.settings.\(secondProfileID)")
+            if let previousStandardOrder {
+                _ = HomeCatalogPayloadStore.write(previousStandardOrder, forKey: SettingsKey.homeCatalogOrder, in: .standard)
+            } else {
+                HomeCatalogPayloadStore.remove(forKey: SettingsKey.homeCatalogOrder, in: .standard)
+            }
+            if let previousDefaultProfileOrder {
+                _ = HomeCatalogPayloadStore.write(
+                    previousDefaultProfileOrder,
+                    forKey: SettingsKey.homeCatalogOrder,
+                    in: defaultProfileStore,
+                    profileID: "default"
+                )
+            } else {
+                HomeCatalogPayloadStore.remove(
+                    forKey: SettingsKey.homeCatalogOrder,
+                    in: defaultProfileStore,
+                    profileID: "default"
+                )
+            }
+        }
+
+        let legacyOrder = try JSONEncoder().encode(["legacy_catalog"])
+        firstStore.set(legacyOrder, forKey: SettingsKey.homeCatalogOrder)
+        HomeCatalogPayloadStore.migrateLegacyPreferences(in: firstStore, profileID: firstProfileID)
+
+        XCTAssertNil(firstStore.data(forKey: SettingsKey.homeCatalogOrder))
+        XCTAssertEqual(
+            HomeCatalogPayloadStore.data(
+                forKey: SettingsKey.homeCatalogOrder,
+                in: firstStore,
+                profileID: firstProfileID
+            ),
+            legacyOrder
+        )
+
+        // A downgraded app can leave a newer defaults copy beside an older file.
+        let downgradedOrder = try JSONEncoder().encode(["downgraded_catalog"])
+        firstStore.set(downgradedOrder, forKey: SettingsKey.homeCatalogOrder)
+        XCTAssertEqual(
+            HomeCatalogPayloadStore.data(
+                forKey: SettingsKey.homeCatalogOrder,
+                in: firstStore,
+                profileID: firstProfileID
+            ),
+            downgradedOrder
+        )
+        XCTAssertNil(firstStore.data(forKey: SettingsKey.homeCatalogOrder))
+
+        let standardOrder = try JSONEncoder().encode(["global_catalog"])
+        let defaultProfileOrder = try JSONEncoder().encode(["default_profile_catalog"])
+        XCTAssertTrue(HomeCatalogPayloadStore.write(
+            standardOrder,
+            forKey: SettingsKey.homeCatalogOrder,
+            in: .standard
+        ))
+        XCTAssertTrue(HomeCatalogPayloadStore.write(
+            defaultProfileOrder,
+            forKey: SettingsKey.homeCatalogOrder,
+            in: defaultProfileStore,
+            profileID: "default"
+        ))
+        XCTAssertEqual(
+            HomeCatalogPayloadStore.data(forKey: SettingsKey.homeCatalogOrder, in: .standard),
+            standardOrder
+        )
+        XCTAssertEqual(
+            HomeCatalogPayloadStore.data(
+                forKey: SettingsKey.homeCatalogOrder,
+                in: defaultProfileStore,
+                profileID: "default"
+            ),
+            defaultProfileOrder
+        )
+
+        let secondOrder = try JSONEncoder().encode(["second_profile_catalog"])
+        XCTAssertTrue(HomeCatalogPayloadStore.write(
+            secondOrder,
+            forKey: SettingsKey.homeCatalogOrder,
+            in: secondStore,
+            profileID: secondProfileID
+        ))
+        XCTAssertEqual(
+            HomeCatalogPayloadStore.data(
+                forKey: SettingsKey.homeCatalogOrder,
+                in: secondStore,
+                profileID: secondProfileID
+            ),
+            secondOrder
+        )
+        XCTAssertEqual(
+            HomeCatalogPayloadStore.data(
+                forKey: SettingsKey.homeCatalogOrder,
+                in: firstStore,
+                profileID: firstProfileID
+            ),
+            downgradedOrder
+        )
+    }
+
+    func testApplyHomeCatalogSettingsStoresOversizedPayloadOutsideUserDefaults() throws {
+        let profileID = "test-home-payload-large-\(UUID().uuidString)"
+        let store = ProfileSettings.store(for: profileID)
+        defer {
+            HomeCatalogPayloadStore.removeAll(in: store, profileID: profileID)
+            store.removeObject(forKey: SettingsKey.homeCatalogShowType)
+            store.removePersistentDomain(forName: "nuvio.tv.profile.settings.\(profileID)")
+        }
+
+        let items: [[String: Any]] = (0..<8_000).map { index in
+            [
+                "addon_id": "test.addon.\(index)",
+                "type": "movie",
+                "catalog_id": "catalog_\(index)",
+                "custom_title": "Catalog \(index) " + String(repeating: "T", count: 180),
+                "enabled": true,
+                "order": index
+            ]
+        }
+        let payload = HomeCatalogSyncPayload(dictionary: [
+            "items": items,
+            "show_catalog_type": false
+        ])
+
+        XCTAssertTrue(NuvioSyncManager.applyHomeCatalogSettings(payload, localProfileId: profileID))
+        XCTAssertFalse(NuvioSyncManager.applyHomeCatalogSettings(payload, localProfileId: profileID))
+        XCTAssertNil(store.data(forKey: SettingsKey.homeCatalogSyncedOrder))
+        XCTAssertNil(store.data(forKey: SettingsKey.homeCatalogDisabled))
+        XCTAssertNil(store.data(forKey: SettingsKey.homeCollectionDisabled))
+        XCTAssertNil(store.data(forKey: SettingsKey.homeCatalogCustomTitles))
+
+        let customTitlesData = try XCTUnwrap(HomeCatalogPayloadStore.data(
+            forKey: SettingsKey.homeCatalogCustomTitles,
+            in: store,
+            profileID: profileID
+        ))
+        XCTAssertGreaterThan(customTitlesData.count, 1024 * 1024)
+        let customTitles = try JSONDecoder().decode([String: String].self, from: customTitlesData)
+        XCTAssertEqual(customTitles.count, items.count)
+        XCTAssertEqual(
+            customTitles["test.addon.7999_movie_catalog_7999"],
+            "Catalog 7999 " + String(repeating: "T", count: 180)
+        )
     }
 
     func testHomeVerticalScrollAnimationCadenceMatchesFluidTiming() {
@@ -796,12 +984,15 @@ final class HomeLayoutSettingsTests: XCTestCase {
         let suite = UserDefaults(suiteName: "nuvio.tv.profile.settings.\(profileId)")!
         defer {
             ProfileSettings.clearActiveProfile()
+            HomeCatalogPayloadStore.removeAll(in: suite, profileID: profileId)
             suite.removePersistentDomain(forName: "nuvio.tv.profile.settings.\(profileId)")
         }
 
         // Simulate legacy unpurged data in the suite before activation
         let dummyData = Data(repeating: 0x41, count: 100_000)
         suite.set(dummyData, forKey: "nuvio.tv.settings.layout.homeCatalogTitles")
+        let legacyOrder = try! JSONEncoder().encode(["profile_catalog"])
+        suite.set(legacyOrder, forKey: SettingsKey.homeCatalogOrder)
 
         // Calling store(for:) MUST be completely read-only and not set the profileScopeKey
         let retrievedStore = ProfileSettings.store(for: profileId)
@@ -810,6 +1001,15 @@ final class HomeLayoutSettingsTests: XCTestCase {
         // Activating the profile purges the legacy blob and marks the suite safely
         ProfileSettings.setActiveProfile(profileId, isPrimary: false)
         XCTAssertNil(retrievedStore.data(forKey: "nuvio.tv.settings.layout.homeCatalogTitles"))
+        XCTAssertNil(retrievedStore.data(forKey: SettingsKey.homeCatalogOrder))
+        XCTAssertEqual(
+            HomeCatalogPayloadStore.data(
+                forKey: SettingsKey.homeCatalogOrder,
+                in: retrievedStore,
+                profileID: profileId
+            ),
+            legacyOrder
+        )
         XCTAssertEqual(retrievedStore.string(forKey: "nuvio.tv.profile.settings.profileID"), profileId)
     }
 

@@ -8,13 +8,17 @@ final class PlayerControlsSettingsTests: XCTestCase {
         XCTAssertEqual(SettingsKey.playerShowEpisodes, "nuvio.tv.settings.playback.showEpisodes")
         XCTAssertEqual(SettingsKey.playerShowSources, "nuvio.tv.settings.playback.showSources")
         XCTAssertEqual(SettingsKey.playerShowSubtitles, "nuvio.tv.settings.playback.showSubtitles")
+        XCTAssertEqual(SettingsKey.playerShowAudio, "nuvio.tv.settings.playback.showAudio")
         XCTAssertEqual(SettingsKey.seekPreviewEnabled, "nuvio.tv.settings.playback.seekPreviewEnabled")
+        XCTAssertEqual(SettingsKey.showLoadingStatus, "nuvio.tv.settings.playback.showLoadingStatus")
 
         XCTAssertTrue(SettingsKey.all.contains(SettingsKey.playerShowPiP))
         XCTAssertTrue(SettingsKey.all.contains(SettingsKey.playerShowEpisodes))
         XCTAssertTrue(SettingsKey.all.contains(SettingsKey.playerShowSources))
         XCTAssertTrue(SettingsKey.all.contains(SettingsKey.playerShowSubtitles))
+        XCTAssertTrue(SettingsKey.all.contains(SettingsKey.playerShowAudio))
         XCTAssertTrue(SettingsKey.all.contains(SettingsKey.seekPreviewEnabled))
+        XCTAssertTrue(SettingsKey.all.contains(SettingsKey.showLoadingStatus))
     }
 
     func testPlayerControlsSettingsSyncMappings() {
@@ -23,14 +27,19 @@ final class PlayerControlsSettingsTests: XCTestCase {
         XCTAssertEqual(localMappings[SettingsKey.playerShowEpisodes], "player_show_episodes")
         XCTAssertEqual(localMappings[SettingsKey.playerShowSources], "player_show_sources")
         XCTAssertEqual(localMappings[SettingsKey.playerShowSubtitles], "player_show_subtitles")
+        XCTAssertEqual(localMappings[SettingsKey.playerShowAudio], "player_show_audio")
         XCTAssertEqual(localMappings[SettingsKey.seekPreviewEnabled], "seek_preview_enabled")
+        XCTAssertEqual(localMappings[SettingsKey.showLoadingStatus], "show_player_loading_status")
 
         let remoteMappings = Dictionary(uniqueKeysWithValues: PlayerSettingsSyncMapper.remoteToLocalKeyMappings)
         XCTAssertEqual(remoteMappings["player_show_pip"], SettingsKey.playerShowPiP)
         XCTAssertEqual(remoteMappings["player_show_episodes"], SettingsKey.playerShowEpisodes)
         XCTAssertEqual(remoteMappings["player_show_sources"], SettingsKey.playerShowSources)
         XCTAssertEqual(remoteMappings["player_show_subtitles"], SettingsKey.playerShowSubtitles)
+        XCTAssertEqual(remoteMappings["player_show_audio"], SettingsKey.playerShowAudio)
         XCTAssertEqual(remoteMappings["seek_preview_enabled"], SettingsKey.seekPreviewEnabled)
+        XCTAssertEqual(remoteMappings["show_player_loading_status"], SettingsKey.showLoadingStatus)
+        XCTAssertEqual(remoteMappings["player_show_loading_status"], SettingsKey.showLoadingStatus)
     }
 
     func testPlayerControlsButtonDefaults() {
@@ -42,26 +51,34 @@ final class PlayerControlsSettingsTests: XCTestCase {
         let episodesEnabled = defaults.object(forKey: SettingsKey.playerShowEpisodes) as? Bool ?? true
         let sourcesEnabled = defaults.object(forKey: SettingsKey.playerShowSources) as? Bool ?? true
         let subtitlesEnabled = defaults.object(forKey: SettingsKey.playerShowSubtitles) as? Bool ?? true
+        let audioEnabled = defaults.object(forKey: SettingsKey.playerShowAudio) as? Bool ?? true
         let seekPreviewEnabled = defaults.object(forKey: SettingsKey.seekPreviewEnabled) as? Bool ?? true
+        let showLoadingStatus = defaults.object(forKey: SettingsKey.showLoadingStatus) as? Bool ?? true
 
         XCTAssertTrue(pipEnabled)
         XCTAssertTrue(episodesEnabled)
         XCTAssertTrue(sourcesEnabled)
         XCTAssertTrue(subtitlesEnabled)
+        XCTAssertTrue(audioEnabled)
         XCTAssertTrue(seekPreviewEnabled)
+        XCTAssertTrue(showLoadingStatus)
 
         // When explicitly set to false, it should disable
         defaults.set(false, forKey: SettingsKey.playerShowPiP)
         defaults.set(false, forKey: SettingsKey.playerShowEpisodes)
         defaults.set(false, forKey: SettingsKey.playerShowSources)
         defaults.set(false, forKey: SettingsKey.playerShowSubtitles)
+        defaults.set(false, forKey: SettingsKey.playerShowAudio)
         defaults.set(false, forKey: SettingsKey.seekPreviewEnabled)
+        defaults.set(false, forKey: SettingsKey.showLoadingStatus)
 
         XCTAssertFalse(defaults.bool(forKey: SettingsKey.playerShowPiP))
         XCTAssertFalse(defaults.bool(forKey: SettingsKey.playerShowEpisodes))
         XCTAssertFalse(defaults.bool(forKey: SettingsKey.playerShowSources))
         XCTAssertFalse(defaults.bool(forKey: SettingsKey.playerShowSubtitles))
+        XCTAssertFalse(defaults.bool(forKey: SettingsKey.playerShowAudio))
         XCTAssertFalse(defaults.bool(forKey: SettingsKey.seekPreviewEnabled))
+        XCTAssertFalse(defaults.bool(forKey: SettingsKey.showLoadingStatus))
     }
 
     func testHybridSeekThumbnailPolicy() {
@@ -943,6 +960,22 @@ extension PlayerControlsSettingsTests {
             SubtitleLanguagePreferences.preferredAudioLanguage(meta: koreanMeta, defaults: defaults),
             "French"
         )
+    }
+
+    @MainActor
+    func testPlayerLoadingStepProgressMessages() async {
+        let coordinator = PlaybackSessionCoordinator(aetherControllerFactory: { nil })
+        let vm = PlayerViewModel(sessionCoordinator: coordinator)
+        
+        // Initial state
+        let initialMsg = vm.loadingStepMessage
+        XCTAssertFalse(initialMsg.isEmpty)
+        
+        // When source switch begins
+        let video = NuvioVideo(id: "ep-1", title: "Ep 1", season: 1, episode: 1, thumbnail: nil, overview: nil, released: nil, rating: nil)
+        vm.selectEpisode(video)
+        let switchingMsg = vm.loadingStepMessage
+        XCTAssertFalse(switchingMsg.isEmpty)
     }
 }
 

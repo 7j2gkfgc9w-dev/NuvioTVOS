@@ -784,6 +784,116 @@ final class StreamsDiscoveryTests: XCTestCase {
         XCTAssertEqual(streams?.first?.name, "Valid Stream 1")
         XCTAssertEqual(streams?.last?.name, "Valid Stream 2")
     }
+
+    func testAddonTransportUrlsSubtitleExtraFormatting() {
+        let segment = AddonTransportUrls.buildSubtitleExtraPathSegment(
+            videoHash: "8e245d9679d31e12",
+            videoSize: 734003200,
+            filename: "The Matrix (1999) 1080p.mkv"
+        )
+        XCTAssertEqual(
+            segment,
+            "videoHash=8e245d9679d31e12&videoSize=734003200&filename=The%20Matrix%20%281999%29%201080p.mkv"
+        )
+
+        let segmentNil = AddonTransportUrls.buildSubtitleExtraPathSegment(
+            videoHash: nil,
+            videoSize: nil,
+            filename: nil
+        )
+        XCTAssertNil(segmentNil)
+
+        let segmentFilenameOnly = AddonTransportUrls.buildSubtitleExtraPathSegment(
+            videoHash: nil,
+            videoSize: nil,
+            filename: "movie.mp4"
+        )
+        XCTAssertEqual(segmentFilenameOnly, "filename=movie.mp4")
+    }
+
+    func testAddonTransportUrlsBuildSubtitleURL() {
+        let manifestURL = URL(string: "https://opensubtitles-v3.strem.io/manifest.json")!
+        let urlWithExtras = AddonTransportUrls.buildSubtitleURL(
+            manifestURL: manifestURL,
+            type: "movie",
+            id: "tt0133093",
+            videoHash: "8e245d9679d31e12",
+            videoSize: 734003200,
+            filename: "The Matrix 1999.mkv"
+        )
+        XCTAssertEqual(
+            urlWithExtras?.absoluteString,
+            "https://opensubtitles-v3.strem.io/subtitles/movie/tt0133093/videoHash=8e245d9679d31e12&videoSize=734003200&filename=The%20Matrix%201999.mkv.json"
+        )
+
+        let urlWithoutExtras = AddonTransportUrls.buildSubtitleURL(
+            manifestURL: manifestURL,
+            type: "movie",
+            id: "tt0133093"
+        )
+        XCTAssertEqual(
+            urlWithoutExtras?.absoluteString,
+            "https://opensubtitles-v3.strem.io/subtitles/movie/tt0133093.json"
+        )
+    }
+
+    func testStreamAddonDecodesVideoHashAndMapsToNuvioStream() throws {
+        let json = """
+        {
+            "streams": [
+                {
+                    "name": "OpenSubtitles Match",
+                    "url": "https://debrid.example/stream.mkv",
+                    "behaviorHints": {
+                        "videoHash": "8e245d9679d31e12",
+                        "videoSize": 1073741824,
+                        "filename": "Movie.2024.1080p.mkv"
+                    }
+                }
+            ]
+        }
+        """.data(using: .utf8)!
+
+        let response = try JSONDecoder().decode(StreamAddonResponse.self, from: json)
+        let streamDTO = try XCTUnwrap(response.streams?.first)
+        XCTAssertEqual(streamDTO.behaviorHints?.videoHash, "8e245d9679d31e12")
+        XCTAssertEqual(streamDTO.behaviorHints?.videoSize, 1073741824)
+        XCTAssertEqual(streamDTO.behaviorHints?.filename, "Movie.2024.1080p.mkv")
+
+        let stream = try XCTUnwrap(streamDTO.toNuvioStream(addonName: "DebridAddon"))
+        XCTAssertEqual(stream.videoHash, "8e245d9679d31e12")
+        XCTAssertEqual(stream.videoSize, 1073741824)
+        XCTAssertEqual(stream.filename, "Movie.2024.1080p.mkv")
+    }
+
+    func testOpenSubtitlesHasherComputesDeterministicChecksum() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+        let fileURL = tempDir.appendingPathComponent("test_hasher_\\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        // Create a 131072-byte (128 KB) buffer with known contents:
+        // first 64KB filled with 0x01, second 64KB filled with 0x02.
+        var data = Data(count: 131072)
+        data.withUnsafeMutableBytes { ptr in
+            ptr.baseAddress!.initializeMemory(as: UInt8.self, repeating: 0x01, count: 65536)
+            (ptr.baseAddress! + 65536).initializeMemory(as: UInt8.self, repeating: 0x02, count: 65536)
+        }
+        try data.write(to: fileURL)
+
+        let result = OpenSubtitlesHasher.computeHashAndSize(for: fileURL)
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.size, 131072)
+        XCTAssertEqual(result?.hash.count, 16)
+
+        let hashOnly = OpenSubtitlesHasher.computeHash(for: fileURL)
+        XCTAssertEqual(hashOnly, result?.hash)
+
+        // File under 64KB should return nil
+        let smallFileURL = tempDir.appendingPathComponent("test_small_\\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: smallFileURL) }
+        try Data(count: 1024).write(to: smallFileURL)
+        XCTAssertNil(OpenSubtitlesHasher.computeHash(for: smallFileURL))
+    }
 }
 
 

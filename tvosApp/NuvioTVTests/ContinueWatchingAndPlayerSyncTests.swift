@@ -40,13 +40,13 @@ final class ContinueWatchingAndPlayerSyncTests: XCTestCase {
     }
 
     func testContinueWatchingExportPreservesAuxiliaryFields() {
+        ContinueWatchingDismissStore.replaceKeys(["tt1234567|1|1", "tt7654321|2|3"], profileId: nil)
         let existingPayload = """
         {
             "isVisible": false,
             "style": "Poster",
             "use_episode_thumbnails_in_cw": false,
             "blur_continue_watching_next_up": true,
-            "dismissedNextUpKeys": ["tt1234567|1|1", "tt7654321|2|3"],
             "showResumePromptOnLaunch": false,
             "sort_mode": "DEFAULT"
         }
@@ -74,6 +74,34 @@ final class ContinueWatchingAndPlayerSyncTests: XCTestCase {
         XCTAssertEqual(json["upNextFromFurthestEpisode"] as? Bool, false)
         XCTAssertEqual(json["show_unaired_next_up"] as? Bool, true)
         XCTAssertEqual(json["sort_mode"] as? String, "STREAMING_STYLE")
+    }
+
+    func testContinueWatchingExportDoesNotResurrectClearedDismissals() {
+        // Given existing payload had a dismissal for tt33546863
+        let existingPayload = """
+        {
+            "dismissedNextUpKeys": ["tt33546863|-1|-1", "tt1234567|1|1"]
+        }
+        """
+        // But local store only has tt1234567|1|1 because tt33546863 was cleared on watch
+        ContinueWatchingDismissStore.replaceKeys(["tt1234567|1|1"], profileId: nil)
+
+        let payload = ContinueWatchingSyncMapper.exportPayload(
+            upNextFromFurthestEpisode: true,
+            showUnairedNextUp: true,
+            continueWatchingSort: "Default",
+            existingPayload: existingPayload
+        )
+
+        guard let data = payload.data(using: .utf8),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let dismissed = json["dismissedNextUpKeys"] as? [String] else {
+            XCTFail("Failed to parse exported JSON payload")
+            return
+        }
+
+        XCTAssertEqual(dismissed, ["tt1234567|1|1"])
+        XCTAssertFalse(dismissed.contains("tt33546863|-1|-1"))
     }
 
     func testContinueWatchingImportPayload() {
@@ -134,6 +162,7 @@ final class ContinueWatchingAndPlayerSyncTests: XCTestCase {
         XCTAssertTrue(localKeys.contains(SettingsKey.playerShowSources))
         XCTAssertTrue(localKeys.contains(SettingsKey.playerShowSubtitles))
         XCTAssertTrue(localKeys.contains(SettingsKey.seekPreviewEnabled))
+        XCTAssertTrue(localKeys.contains(SettingsKey.showLoadingStatus))
         XCTAssertTrue(localKeys.contains(SettingsKey.streamAutoPlayPreferBingeGroup))
         XCTAssertTrue(localKeys.contains(SettingsKey.streamAutoPlayReuseBingeGroup))
 
@@ -159,6 +188,8 @@ final class ContinueWatchingAndPlayerSyncTests: XCTestCase {
         XCTAssertTrue(remoteKeys.contains("player_show_sources"))
         XCTAssertTrue(remoteKeys.contains("player_show_subtitles"))
         XCTAssertTrue(remoteKeys.contains("seek_preview_enabled"))
+        XCTAssertTrue(remoteKeys.contains("show_player_loading_status"))
+        XCTAssertTrue(remoteKeys.contains("player_show_loading_status"))
     }
 
     func testAutoPlayModeWireMapping() {

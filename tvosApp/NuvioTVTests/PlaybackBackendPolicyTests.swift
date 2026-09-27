@@ -102,6 +102,70 @@ final class PlaybackBackendPolicyTests: XCTestCase {
     }
 
     @MainActor
+    func testLoadErrorClearAndDelayedAetherCallbackAreGenerationScoped() throws {
+        let aether = try XCTUnwrap(AetherPlaybackController())
+        let coordinator = PlaybackSessionCoordinator(
+            aetherController: aether,
+            aetherControllerFactory: { aether },
+            engineSettingProvider: { "AetherEngine" },
+            loadDispatcher: { _, _, _ in }
+        )
+        let model = PlayerViewModel(sessionCoordinator: coordinator)
+        defer { coordinator.stopAll() }
+
+        coordinator.load(PlaybackLoadRequest(videoURL: URL(string: "https://example.test/first")!))
+        let firstGeneration = coordinator.loadGeneration
+        let delayedTerminalError = aether.onTerminalError
+
+        coordinator.load(PlaybackLoadRequest(videoURL: URL(string: "https://example.test/second")!))
+        let currentGeneration = coordinator.loadGeneration
+        XCTAssertGreaterThan(currentGeneration, firstGeneration)
+
+        delayedTerminalError?("stale terminal error")
+        XCTAssertNil(coordinator.lastLoadError)
+
+        aether.onTerminalError?("current terminal error")
+        XCTAssertEqual(coordinator.lastLoadError, "current terminal error")
+        XCTAssertEqual(model.status, .error("current terminal error"))
+        XCTAssertFalse(coordinator.clearLoadErrorAfterVerifiedRecovery(generation: firstGeneration))
+        XCTAssertEqual(coordinator.lastLoadError, "current terminal error")
+
+        XCTAssertTrue(coordinator.clearLoadErrorAfterVerifiedRecovery(generation: currentGeneration))
+        XCTAssertNil(coordinator.lastLoadError)
+        XCTAssertEqual(model.status, .buffering)
+    }
+
+    @MainActor
+    func testInitialLoadWatchdogArmsWhenReloadCallbackIsInstalledFirst() {
+        let coordinator = PlaybackSessionCoordinator(
+            engineSettingProvider: { "MPVKit" },
+            loadDispatcher: { _, _, _ in }
+        )
+        let model = PlayerViewModel(sessionCoordinator: coordinator)
+        model.reloadCurrentStream = { _, _ in nil }
+
+        model.load(
+            url: URL(fileURLWithPath: "/tmp/startup-watchdog.mkv"),
+            meta: NuvioMeta(id: "tt1234567", name: "Startup test", type: "movie"),
+            subtitle: "",
+            resumeFrom: nil
+        )
+
+        XCTAssertNotNil(model.loadWatchdogTask)
+        model.shutdown()
+    }
+
+    func testVMErrorRecoveryNeedsMultipleAdvancingSamplesAndHalfSecond() {
+        var progress = PlayerErrorRecoveryProgress(position: 40, uptime: 100)
+        XCTAssertFalse(progress.observe(position: 40, uptime: 100.25))
+        XCTAssertFalse(progress.observe(position: 40.25, uptime: 100.25))
+        XCTAssertTrue(progress.observe(position: 40.5, uptime: 100.5))
+
+        var singleJump = PlayerErrorRecoveryProgress(position: 40, uptime: 100)
+        XCTAssertFalse(singleJump.observe(position: 40.75, uptime: 100.75))
+    }
+
+    @MainActor
     func testRetryConstructsAetherOnceAndStopPreventsRestart() {
         var constructionCount = 0
         let coordinator = PlaybackSessionCoordinator(
