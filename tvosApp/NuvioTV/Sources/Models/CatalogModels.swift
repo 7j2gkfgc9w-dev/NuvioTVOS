@@ -953,6 +953,8 @@ struct NuvioStream: Identifiable, Codable {
     /// Stremio `behaviorHints.videoSize`, retained for the Android-compatible
     /// stream file-size badge.
     let videoSize: Int64?
+    /// Stremio `behaviorHints.videoHash` for exact OpenSubtitles matching.
+    let videoHash: String?
     /// Stremio `behaviorHints.bingeGroup` — same release group for episode autoplay.
     let bingeGroup: String?
     /// Explicit cached flag from the add-on when present; otherwise inferred from text.
@@ -976,6 +978,7 @@ struct NuvioStream: Identifiable, Codable {
         sources: [String] = [],
         filename: String? = nil,
         videoSize: Int64? = nil,
+        videoHash: String? = nil,
         bingeGroup: String? = nil,
         isCached: Bool? = nil,
         httpHeaders: [String: String]? = nil,
@@ -997,6 +1000,7 @@ struct NuvioStream: Identifiable, Codable {
         self.sources = TorrentSourceParser.normalizedTrackers(sources)
         self.filename = filename
         self.videoSize = videoSize
+        self.videoHash = videoHash
         self.bingeGroup = bingeGroup
         self.isCached = isCached
         self.httpHeaders = httpHeaders
@@ -1045,7 +1049,8 @@ struct NuvioStream: Identifiable, Codable {
             url: url, name: name, description: description, addonName: addonName,
             subtitles: subtitles, addonLogoURL: logo, infoHash: infoHash,
             fileIdx: fileIdx, sources: sources, filename: filename, videoSize: videoSize,
-            bingeGroup: bingeGroup, isCached: isCached, httpHeaders: httpHeaders
+            videoHash: videoHash, bingeGroup: bingeGroup, isCached: isCached,
+            httpHeaders: httpHeaders, trickplayURL: trickplayURL
         )
     }
 
@@ -1070,9 +1075,11 @@ struct NuvioStream: Identifiable, Codable {
             sources: sources,
             filename: filename,
             videoSize: videoSize,
+            videoHash: videoHash,
             bingeGroup: bingeGroup,
             isCached: isCached,
-            httpHeaders: httpHeaders
+            httpHeaders: httpHeaders,
+            trickplayURL: trickplayURL
         )
     }
 }
@@ -1985,7 +1992,10 @@ enum ContinueWatchingStore {
         guard position.isFinite,
               duration.isFinite,
               position > 0,
-              duration >= 60 else { return }
+              duration >= 60 else {
+            print("[ContinueWatching][Store] save rejected: meta=\(meta.id), pos=\(position), dur=\(duration)")
+            return
+        }
 
         // If an item for this title already exists and has the same episode, stream,
         // and playback position within 1 second, the progress is unchanged.
@@ -1997,6 +2007,8 @@ enum ContinueWatchingStore {
            existing.streamUrl == streamUrl {
             return
         }
+
+        print("[ContinueWatching][Store] save: meta=\(meta.id), S\(season.map(String.init) ?? "nil")E\(episode.map(String.init) ?? "nil"), pos=\(position)/\(duration)")
 
         // Going back to a title retires the removal the user made earlier, so a
         // months-old dismissal can never hide progress they just made.
@@ -2029,6 +2041,7 @@ enum ContinueWatchingStore {
         )
 
         guard shouldKeep(position: position, duration: duration) else {
+            print("[ContinueWatching][Store] save: shouldKeep=false (pos=\(position)/dur=\(duration) >= \(WatchProgressLedger.completionFraction)) -> removing from store")
             if let season, let episode {
                 removeEpisodeResumePoint(meta: meta, season: season, episode: episode)
             }
@@ -2061,6 +2074,7 @@ enum ContinueWatchingStore {
             released: existing?.released
         )
         let updated = ([item] + items().filter { $0.meta.id != meta.id }).prefix(maxItems)
+        print("[ContinueWatching][Store] save: persisting \(updated.count) items in store")
         persist(Array(updated))
     }
 
@@ -2078,6 +2092,7 @@ enum ContinueWatchingStore {
         episode: Int? = nil
     ) {
         guard duration.isFinite, duration > 0 else { return }
+        print("[ContinueWatching][Store] markPlaybackCompleted: meta=\(meta.id), S\(season.map(String.init) ?? "nil")E\(episode.map(String.init) ?? "nil"), dur=\(duration)")
         ContinueWatchingDismissStore.clear(contentId: meta.id)
         WatchProgressLedger.upsert(
             WatchProgressRecord(
@@ -2118,6 +2133,8 @@ enum ContinueWatchingStore {
         released: String? = nil,
         seedSeason: Int? = nil
     ) {
+        print("[ContinueWatching][Store] saveUpNext: meta=\(meta.id), S\(season)E\(episode), dur=\(duration)")
+        ContinueWatchingDismissStore.clear(contentId: meta.id)
         let item = ContinueWatchingItem(
             meta: meta,
             streamUrl: "",
@@ -2241,6 +2258,7 @@ enum ContinueWatchingStore {
     /// simply finished, where the row still has to seed Next Up. A user-initiated
     /// removal clears both, so the title does not come back on the next rebuild.
     static func remove(metaId: String, retainingLedger: Bool = false) {
+        print("[ContinueWatching][Store] remove: metaId=\(metaId), retainingLedger=\(retainingLedger)")
         if !retainingLedger {
             WatchProgressLedger.removeContent(id: metaId)
         }
@@ -2263,10 +2281,13 @@ enum ContinueWatchingStore {
             episode: episode
         ), !WatchProgressLedger.isComplete(record) else { return }
 
+        print("[ContinueWatching][Store] markLedgerWatched: completing ledger row for \(meta.id) S\(season.map(String.init) ?? "nil")E\(episode.map(String.init) ?? "nil")")
+
         // A row whose runtime was never learned cannot express completion as
         // position-over-runtime, and there is no other completion flag on the
         // wire. Dropping it is the only way to stop it rebuilding as progress.
         guard record.duration > 0 else {
+            print("[ContinueWatching][Store] markLedgerWatched: duration is 0, removing record key \(record.progressKey)")
             WatchProgressLedger.remove(keys: [record.progressKey])
             return
         }
@@ -2314,18 +2335,30 @@ enum ContinueWatchingStore {
                 season: season,
                 episode: episode
             )
-            return !keys.contains {
+            let isSuperseded = keys.contains {
                 newestWatchedByIdentity[$0].map { $0 >= progress.lastWatchedAt } ?? false
             }
+            if isSuperseded {
+                print("[ContinueWatching][Store] removeWatched: removing \(progress.meta.id) S\(season.map(String.init) ?? "nil")E\(episode.map(String.init) ?? "nil") - marked watched at date >= progress date (\(progress.lastWatchedAt))")
+            }
+            return !isSuperseded
         }
         guard remaining.count != current.count else { return }
+        print("[ContinueWatching][Store] removeWatched: updated CW items from \(current.count) -> \(remaining.count)")
         persist(remaining)
     }
 
     /// Installs a freshly derived list. `ContinueWatchingBuilder` owns the
     /// derivation; this store only persists and publishes the result.
     static func replaceAll(_ newItems: [ContinueWatchingItem]) {
+        let current = items()
         let ordered = Array(newItems.sorted { $0.lastWatchedAt > $1.lastWatchedAt }.prefix(maxItems))
+        let newIds = Set(ordered.map(\.meta.id))
+        let dropped = current.filter { !newIds.contains($0.meta.id) }
+        if !dropped.isEmpty {
+            print("[ContinueWatching][Store] replaceAll: dropping \(dropped.count) items previously in store: \(dropped.map { "\($0.meta.id) (pos=\($0.position)/\($0.duration), upNext=\($0.isUpNextEntry))" })")
+        }
+        print("[ContinueWatching][Store] replaceAll: replacing \(current.count) items with \(ordered.count) items: \(ordered.map { "\($0.meta.id) (pos=\($0.position)/\($0.duration), upNext=\($0.isUpNextEntry))" })")
         guard persist(ordered) else { return }
 
         // Keep per-episode resume points in step so opening an episode directly
@@ -2919,13 +2952,16 @@ enum ContinueWatchingDismissStore {
         if numbers == nil {
             current.insert("\(item.meta.id.trimmingCharacters(in: .whitespacesAndNewlines))\(separator)-1\(separator)-1")
         }
+        print("[ContinueWatchingDismissStore] dismiss: item \(item.meta.id), inserted \(specificKey), total keys=\(current.count)")
         persist(current)
     }
 
     static func dismiss(contentId: String) {
         var current = keys()
         let id = contentId.trimmingCharacters(in: .whitespacesAndNewlines)
-        current.insert("\(id)\(separator)-1\(separator)-1")
+        let wildcard = "\(id)\(separator)-1\(separator)-1"
+        current.insert(wildcard)
+        print("[ContinueWatchingDismissStore] dismiss: contentId \(contentId), inserted \(wildcard), total keys=\(current.count)")
         persist(current)
     }
 
@@ -2938,10 +2974,12 @@ enum ContinueWatchingDismissStore {
         let prefix2 = "\(id)\(legacySeparator)"
         let remaining = current.filter { !$0.hasPrefix(prefix1) && !$0.hasPrefix(prefix2) && $0 != id }
         guard remaining.count != current.count else { return }
+        print("[ContinueWatchingDismissStore] clear: cleared dismissals for \(contentId) (from \(current.count) -> \(remaining.count) keys)")
         persist(remaining)
     }
 
     static func replaceKeys(_ keys: Set<String>, profileId: String?) {
+        print("[ContinueWatchingDismissStore] replaceKeys: replacing keys with \(keys.count) items for profile=\(profileId ?? "nil")")
         persist(keys, profileId: profileId)
     }
 
@@ -4580,6 +4618,240 @@ enum LargePayloadStore {
     }
 }
 
+/// File-backed storage for the profile's Home catalog layout payloads.
+/// Legacy UserDefaults values are removed only after a durable file copy exists.
+enum HomeCatalogPayloadStore {
+    private static let directoryName = "homeCatalogSettings"
+    private static let snapshotKeyPrefix = "homeCatalogSnapshot_"
+    private static let payloadKeys = [
+        SettingsKey.homeCatalogOrder,
+        SettingsKey.homeCatalogSyncedOrder,
+        SettingsKey.homeCatalogDisabled,
+        SettingsKey.homeCollectionDisabled,
+        SettingsKey.homeCatalogCustomTitles
+    ]
+    private struct Snapshot: Codable {
+        var values: [String: Data] = [:]
+    }
+
+    private static let lock = NSRecursiveLock()
+    private static var snapshots: [String: Snapshot] = [:]
+    private static var customTitlesByProfile: [String: [String: String]] = [:]
+
+    static func data(
+        forKey key: String,
+        in settings: UserDefaults = ProfileSettings.current,
+        profileID: String? = nil
+    ) -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let scope = profileScope(in: settings, profileID: profileID)
+        var snapshot = loadSnapshot(for: scope)
+        let stored = snapshot.values[key]
+        if let legacy = settings.data(forKey: key) {
+            if stored != legacy {
+                snapshot.values[key] = legacy
+                if writeSnapshot(snapshot, for: scope) {
+                    settings.removeObject(forKey: key)
+                    invalidateCustomTitlesCache(for: key, scope: scope)
+                }
+                return legacy
+            }
+            settings.removeObject(forKey: key)
+            return legacy
+        }
+
+        return stored
+    }
+
+    /// Returns true when the value is already durable or the new bytes reached disk.
+    @discardableResult
+    static func write(
+        _ data: Data,
+        forKey key: String,
+        in settings: UserDefaults = ProfileSettings.current,
+        profileID: String? = nil
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let scope = profileScope(in: settings, profileID: profileID)
+        var snapshot = loadSnapshot(for: scope)
+        let legacy = settings.data(forKey: key)
+        if snapshot.values[key] == data, (legacy == nil || legacy == data) {
+            settings.removeObject(forKey: key)
+            return true
+        }
+
+        snapshot.values[key] = data
+        guard writeSnapshot(snapshot, for: scope) else { return false }
+        settings.removeObject(forKey: key)
+        invalidateCustomTitlesCache(for: key, scope: scope)
+        return true
+    }
+
+    /// Writes related catalog blobs as one atomic file replacement.
+    @discardableResult
+    static func writeBatch(
+        _ values: [String: Data],
+        in settings: UserDefaults = ProfileSettings.current,
+        profileID: String? = nil
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let scope = profileScope(in: settings, profileID: profileID)
+        var snapshot = loadSnapshot(for: scope)
+        let didChange = values.contains { entry in
+            let legacy = settings.data(forKey: entry.key)
+            return snapshot.values[entry.key] != entry.value
+                || (legacy != nil && legacy != entry.value)
+        }
+        if didChange {
+            for (key, value) in values {
+                snapshot.values[key] = value
+            }
+            guard writeSnapshot(snapshot, for: scope) else { return false }
+        }
+
+        for key in values.keys {
+            settings.removeObject(forKey: key)
+            invalidateCustomTitlesCache(for: key, scope: scope)
+        }
+        return true
+    }
+
+    static func remove(
+        forKey key: String,
+        in settings: UserDefaults = ProfileSettings.current,
+        profileID: String? = nil
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let scope = profileScope(in: settings, profileID: profileID)
+        var snapshot = loadSnapshot(for: scope)
+        if snapshot.values.removeValue(forKey: key) != nil,
+           !writeSnapshot(snapshot, for: scope) {
+            return
+        }
+        settings.removeObject(forKey: key)
+        invalidateCustomTitlesCache(for: key, scope: scope)
+    }
+
+    @discardableResult
+    static func migrateLegacyPreferences(in settings: UserDefaults, profileID: String? = nil) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let scope = profileScope(in: settings, profileID: profileID)
+        var snapshot = loadSnapshot(for: scope)
+        var migratedKeys: [String] = []
+        var didChange = false
+        for key in payloadKeys where settings.data(forKey: key) != nil {
+            if let legacy = settings.data(forKey: key), snapshot.values[key] != legacy {
+                snapshot.values[key] = legacy
+                didChange = true
+            }
+            migratedKeys.append(key)
+        }
+
+        guard !migratedKeys.isEmpty else { return true }
+        let hasFileCopy = migratedKeys.allSatisfy { snapshot.values[$0] != nil }
+        guard hasFileCopy else { return false }
+        if didChange && !writeSnapshot(snapshot, for: scope) { return false }
+        for key in migratedKeys {
+            settings.removeObject(forKey: key)
+            invalidateCustomTitlesCache(for: key, scope: scope)
+        }
+        return true
+    }
+
+    static func migrateAllKnownPreferences() -> Bool {
+        var succeeded = migrateLegacyPreferences(in: .standard)
+        for profileID in ["guest", "default", "1", "2", "3", "4", "5", "6"] {
+            guard let suite = UserDefaults(suiteName: "nuvio.tv.profile.settings.\(profileID)") else { continue }
+            if !migrateLegacyPreferences(in: suite, profileID: profileID) {
+                succeeded = false
+            }
+        }
+        return succeeded
+    }
+
+    static func removeAll(in settings: UserDefaults, profileID: String? = nil) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let scope = profileScope(in: settings, profileID: profileID)
+        LargePayloadStore.remove(key: snapshotKey(for: scope), directory: directoryName)
+        snapshots[scope] = Snapshot()
+        customTitlesByProfile.removeValue(forKey: scope)
+        for key in payloadKeys {
+            settings.removeObject(forKey: key)
+        }
+    }
+
+    static func customCatalogTitles(
+        in settings: UserDefaults = ProfileSettings.current,
+        profileID: String? = nil
+    ) -> [String: String] {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let scope = profileScope(in: settings, profileID: profileID)
+        if let cached = customTitlesByProfile[scope] { return cached }
+        let titles: [String: String]
+        if let data = self.data(forKey: SettingsKey.homeCatalogCustomTitles, in: settings, profileID: profileID),
+           let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
+            titles = decoded
+        } else {
+            titles = [:]
+        }
+        customTitlesByProfile[scope] = titles
+        return titles
+    }
+
+    private static func loadSnapshot(for scope: String) -> Snapshot {
+        if let cached = snapshots[scope] { return cached }
+        let snapshot = LargePayloadStore.read(key: snapshotKey(for: scope), directory: directoryName)
+            .flatMap { try? PropertyListDecoder().decode(Snapshot.self, from: $0) }
+            ?? Snapshot()
+        snapshots[scope] = snapshot
+        return snapshot
+    }
+
+    private static func writeSnapshot(_ snapshot: Snapshot, for scope: String) -> Bool {
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        guard let data = try? encoder.encode(snapshot),
+              LargePayloadStore.write(data, key: snapshotKey(for: scope), directory: directoryName) else {
+            return false
+        }
+        snapshots[scope] = snapshot
+        return true
+    }
+
+    private static func snapshotKey(for scope: String) -> String {
+        snapshotKeyPrefix + scope
+    }
+
+    private static func profileScope(in settings: UserDefaults, profileID: String?) -> String {
+        if let id = profileID, !id.isEmpty { return "profile:\(id)" }
+        if settings === UserDefaults.standard { return "standard" }
+        if let id = settings.string(forKey: "nuvio.tv.profile.settings.profileID"), !id.isEmpty {
+            return "profile:\(id)"
+        }
+        if let id = ProfileSettings.activeProfileID, !id.isEmpty { return "profile:\(id)" }
+        return "profile:default"
+    }
+
+    private static func invalidateCustomTitlesCache(for key: String, scope: String) {
+        guard key == SettingsKey.homeCatalogCustomTitles else { return }
+        customTitlesByProfile.removeValue(forKey: scope)
+    }
+}
+
 /// An in-memory, pre-indexed lookup snapshot for watched history.
 /// Precalculates hash sets and dictionaries so UI elements (like `WatchedCheckmarkBadge`)
 /// can query watched status in O(1) time with 0 JSON decodes and 0 disk I/O.
@@ -5450,6 +5722,7 @@ enum WatchedStore {
 
     @discardableResult
     static func markWatched(_ meta: NuvioMeta, season: Int? = nil, episode: Int? = nil) -> Bool {
+        print("[WatchedStore] markWatched called: meta=\(meta.id), S\(season.map(String.init) ?? "nil")E\(episode.map(String.init) ?? "nil")")
         // A new mark is attributed to the selected backend immediately. Trakt
         // is also mirrored when connected, even if another backend owns resume.
         let item = WatchedStoreItem(
@@ -6582,17 +6855,28 @@ enum ProfileSettings {
     static func setActiveProfile(_ profileId: String?, isPrimary: Bool? = nil) {
         guard let id = profileId, !id.isEmpty else { return }
         let suite = store(for: id)
-        LargePayloadStore.purgeLegacyOversizedPreferences(in: suite)
-        LargePayloadStore.purgeLegacyOversizedPreferences(in: .standard)
-        // Mark only after cleanup. See the read-only `store(for:)` accessor.
-        if suite.string(forKey: profileScopeKey) != id {
-            suite.set(id, forKey: profileScopeKey)
-        }
+        let profileMigrationSucceeded = HomeCatalogPayloadStore.migrateLegacyPreferences(in: suite, profileID: id)
+        let standardMigrationSucceeded = HomeCatalogPayloadStore.migrateLegacyPreferences(in: .standard)
+        let canMutatePreferences = profileMigrationSucceeded && standardMigrationSucceeded
         let primary = isPrimary ?? (id == "1")
         let needsSeed = !suite.bool(forKey: seededFlag)
-        seedFromGlobalIfNeeded(suite, isPrimary: primary)
+        if canMutatePreferences {
+            LargePayloadStore.purgeLegacyOversizedPreferences(in: suite)
+            LargePayloadStore.purgeLegacyOversizedPreferences(in: .standard)
+            // Mark only after cleanup. See the read-only `store(for:)` accessor.
+            if suite.string(forKey: profileScopeKey) != id {
+                suite.set(id, forKey: profileScopeKey)
+            }
+            seedFromGlobalIfNeeded(suite, isPrimary: primary)
+        }
+
+        // Profile selection remains active when disk migration fails. In that
+        // case, skip preference mutations so an oversized legacy domain is not
+        // sent back through cfprefsd.
         current = suite
         activeProfileID = id
+        guard canMutatePreferences else { return }
+
         suite.set(primary, forKey: primaryProfileKey)
         migrateTraktIsolationIfNeeded(in: suite, isPrimary: primary)
         migrateSimklIsolationIfNeeded(in: suite, profileScope: id, isPrimary: primary)
@@ -6634,6 +6918,9 @@ enum ProfileSettings {
         if let value = store.object(forKey: primaryProfileKey) as? Bool {
             return value
         }
+        if store === current, let activeProfileID {
+            return activeProfileID == "1"
+        }
         return store.string(forKey: profileScopeKey) == "1"
     }
 
@@ -6647,6 +6934,7 @@ enum ProfileSettings {
         let simklTokenStorage = SimklKeychainTokenStorage()
         let mdbListTokenStorage = MdbListKeychainTokenStorage()
         for id in Set(profileIds) where !id.isEmpty {
+            HomeCatalogPayloadStore.removeAll(in: store(for: id), profileID: id)
             simklTokenStorage.setAccessToken(nil, for: id)
             MdbListAuthStore.clearAuth(
                 profileScope: id,
@@ -6658,6 +6946,7 @@ enum ProfileSettings {
             StreamBadgeSettingsStore.removeRules(for: id)
             UserDefaults.standard.removePersistentDomain(forName: "\(suitePrefix).\(id)")
         }
+        HomeCatalogPayloadStore.removeAll(in: .standard)
         AISubtitleKeyStore.remove(profileScope: "default")
         Task { await AISubtitleTranslationCache.shared.removeAll(profileScope: "default") }
         StreamBadgeSettingsStore.removeRules(for: "default")

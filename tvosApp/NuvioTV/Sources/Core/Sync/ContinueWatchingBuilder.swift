@@ -93,10 +93,12 @@ enum ContinueWatchingBuilder {
     static func rebuild(reason: String) async {
         let rebuildStarted = TVHomeDebugTrace.now()
         TVHomeDebugTrace.log("cw.builder.rebuild.begin reason=\(reason)")
+        print("[ContinueWatchingBuilder] rebuild started: reason=\(reason)")
         // With Trakt or Simkl driving the row, Home renders that provider's list
         // and this derived one is never shown. Keep syncing rows into the ledger,
         // but do not spend metadata requests rendering something invisible.
         guard !RemoteTrackingState.isProgressSourceAuthenticated else {
+            print("[ContinueWatchingBuilder] rebuild: skipped because remote progress source is authenticated")
             await MainActor.run {
                 diagnostic = "\(reason): skipped, remote progress source active"
             }
@@ -120,7 +122,9 @@ enum ContinueWatchingBuilder {
                 watchedHistorySeeds()
             )
             : []
+        print("[ContinueWatchingBuilder] rebuild: profile=\(profileId ?? "nil"), ledger records=\(ledgerSnapshot.count), candidates=\(candidates.count) (\(candidates.map(\.progressKey))), seeds=\(seeds.count) (\(seeds.map(\.progressKey)))")
         guard !candidates.isEmpty || !seeds.isEmpty else {
+            print("[ContinueWatchingBuilder] rebuild: ledger empty -> setting empty CW store")
             await MainActor.run {
                 diagnostic = "\(reason): ledger empty"
                 plan = []
@@ -131,9 +135,14 @@ enum ContinueWatchingBuilder {
             return
         }
 
+        for candidate in candidates where !WatchProgressLedger.isComplete(candidate) && candidate.position > 5 {
+            ContinueWatchingDismissStore.clear(contentId: candidate.contentId)
+        }
+
         let currentPlan = planEntries(candidates: candidates, seeds: seeds)
         let existingItems = ContinueWatchingStore.items()
         let slice = Array(currentPlan.prefix(pageSize))
+        print("[ContinueWatchingBuilder] rebuild: plan count=\(currentPlan.count), slice prefix=\(slice.count) items")
 
         let page = await materializeSlice(
             slice: slice,
@@ -143,7 +152,10 @@ enum ContinueWatchingBuilder {
         )
         guard !Task.isCancelled else { return }
         let isCurrentGen = await MainActor.run { currentGeneration == generation }
-        guard isCurrentGen else { return }
+        guard isCurrentGen else {
+            print("[ContinueWatchingBuilder] rebuild: generation outdated (\(currentGeneration) != \(generation)) -> cancelling this pass")
+            return
+        }
 
         // Finishing an episode writes its completed ledger row and then saves a
         // display-only Next Up card. A rebuild that began before those writes
@@ -151,6 +163,7 @@ enum ContinueWatchingBuilder {
         // replace the freshly saved card with an empty page. Leave the newer
         // store untouched and derive it again from the completed ledger row.
         guard rebuildInputIsCurrent(ledgerSnapshot) else {
+            print("[ContinueWatchingBuilder] rebuild: ledger snapshot changed during materializeSlice! Retrying...")
             await MainActor.run {
                 diagnostic = "\(reason): ledger changed while building, retrying"
                 scheduleRebuild(reason: "\(reason) (ledger changed)")
@@ -158,6 +171,7 @@ enum ContinueWatchingBuilder {
             return
         }
 
+        print("[ContinueWatchingBuilder] rebuild: materialization finished, updating ContinueWatchingStore with \(page.items.count) items (failed lookups: \(page.failedLookups))")
         // Only the first page is persisted; it is what a cold start renders.
         ContinueWatchingStore.replaceAll(page.items)
         let diagText = "\(reason): ledger \(WatchProgressLedger.records().count), "
@@ -541,9 +555,13 @@ enum ContinueWatchingBuilder {
                 season: item.meta.isSeries ? item.season : nil,
                 episode: item.meta.isSeries ? item.episode : nil
             )
-            return !keys.contains {
+            let isSuperseded = keys.contains {
                 newestByIdentity[$0].map { $0 >= item.lastWatchedAt } ?? false
             }
+            if isSuperseded {
+                print("[ContinueWatchingBuilder] retainingUnwatched: filtered out \(item.meta.id) S\(item.season.map(String.init) ?? "nil")E\(item.episode.map(String.init) ?? "nil") (item lastWatchedAt=\(item.lastWatchedAt) <= watchedAt)")
+            }
+            return !isSuperseded
         }
     }
 

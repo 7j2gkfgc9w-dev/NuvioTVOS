@@ -69,4 +69,47 @@ public enum AddonTransportUrls {
         }
         return URL(string: path)
     }
+
+    /// Builds the `extra` path segment for a Stremio subtitle request:
+    /// e.g. `videoHash=<hash>&videoSize=<size>&filename=<filename>`
+    public static func buildSubtitleExtraPathSegment(
+        videoHash: String? = nil,
+        videoSize: Int64? = nil,
+        filename: String? = nil
+    ) -> String? {
+        var parts: [String] = []
+        if let videoHash = videoHash?.trimmingCharacters(in: .whitespacesAndNewlines), !videoHash.isEmpty {
+            parts.append("videoHash=\(encodePathSegment(videoHash))")
+        }
+        if let videoSize, videoSize > 0 {
+            parts.append("videoSize=\(videoSize)")
+        }
+        if let filename = filename?.trimmingCharacters(in: .whitespacesAndNewlines), !filename.isEmpty {
+            parts.append("filename=\(encodePathSegment(filename))")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: "&")
+    }
+
+    /// Convenience for building a subtitle resource URL with optional videoHash, videoSize, and filename extras.
+    public static func buildSubtitleURL(
+        manifestURL: URL,
+        type: String,
+        id: String,
+        videoHash: String? = nil,
+        videoSize: Int64? = nil,
+        filename: String? = nil
+    ) -> URL? {
+        let extra = buildSubtitleExtraPathSegment(
+            videoHash: videoHash,
+            videoSize: videoSize,
+            filename: filename
+        )
+        return buildResourceURL(
+            manifestURL: manifestURL,
+            resource: "subtitles",
+            type: type,
+            id: id,
+            extraPathSegment: extra
+        )
+    }
 }

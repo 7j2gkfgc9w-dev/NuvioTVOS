@@ -532,7 +532,13 @@ final class StreamsRepository: ObservableObject {
 
     // MARK: - External subtitles
 
-    private func fetchExternalSubtitles(type: String, videoId: String) async -> [NuvioSubtitle] {
+    private func fetchExternalSubtitles(
+        type: String,
+        videoId: String,
+        videoHash: String? = nil,
+        videoSize: Int64? = nil,
+        filename: String? = nil
+    ) async -> [NuvioSubtitle] {
         let subtitleType = Self.isSeriesType(type) ? "series" : "movie"
         let builtIn: [(name: String, url: URL)] = [
             (
@@ -542,11 +548,13 @@ final class StreamsRepository: ObservableObject {
         ]
 
         var endpoints: [(name: String, subtitleURL: URL)] = builtIn.compactMap { item in
-            guard let subtitleURL = AddonTransportUrls.buildResourceURL(
+            guard let subtitleURL = AddonTransportUrls.buildSubtitleURL(
                 manifestURL: item.url,
-                resource: "subtitles",
                 type: subtitleType,
-                id: videoId
+                id: videoId,
+                videoHash: videoHash,
+                videoSize: videoSize,
+                filename: filename
             ) else { return nil }
             return (item.name, subtitleURL)
         }
@@ -556,11 +564,13 @@ final class StreamsRepository: ObservableObject {
         for url in enabledURLs {
             guard let manifest = manifests[url],
                   manifest.supportsResource("subtitles", type: subtitleType, id: videoId),
-                  let subtitleURL = AddonTransportUrls.buildResourceURL(
+                  let subtitleURL = AddonTransportUrls.buildSubtitleURL(
                       manifestURL: url,
-                      resource: "subtitles",
                       type: subtitleType,
-                      id: videoId
+                      id: videoId,
+                      videoHash: videoHash,
+                      videoSize: videoSize,
+                      filename: filename
                   ) else {
                 continue
             }
@@ -903,6 +913,7 @@ struct StreamAddonStreamDTO: Decodable {
             sources: (sources ?? []) + (resolve?.sources ?? []),
             filename: cleaned(behaviorHints?.filename) ?? cleaned(resolve?.filename),
             videoSize: behaviorHints?.videoSize,
+            videoHash: cleaned(behaviorHints?.videoHash),
             bingeGroup: cleaned(behaviorHints?.bingeGroup),
             isCached: behaviorHints?.cached ?? behaviorHints?.isCached,
             httpHeaders: behaviorHints?.proxyHeaders?.request,
@@ -1030,6 +1041,7 @@ struct StreamAddonSubtitleDTO: Decodable {
 struct StreamAddonBehaviorHints: Decodable {
     let videoSize: Int64?
     let filename: String?
+    let videoHash: String?
     let bingeGroup: String?
     let cached: Bool?
     let isCached: Bool?
@@ -1039,12 +1051,13 @@ struct StreamAddonBehaviorHints: Decodable {
     let storyboard: String?
 
     enum CodingKeys: String, CodingKey {
-        case videoSize, filename, bingeGroup, cached, isCached, proxyHeaders, trickplay, trickplayUrl, storyboard
+        case videoSize, filename, videoHash, bingeGroup, cached, isCached, proxyHeaders, trickplay, trickplayUrl, storyboard
     }
 
     init(
         videoSize: Int64? = nil,
         filename: String? = nil,
+        videoHash: String? = nil,
         bingeGroup: String? = nil,
         cached: Bool? = nil,
         isCached: Bool? = nil,
@@ -1055,6 +1068,7 @@ struct StreamAddonBehaviorHints: Decodable {
     ) {
         self.videoSize = videoSize
         self.filename = filename
+        self.videoHash = videoHash
         self.bingeGroup = bingeGroup
         self.cached = cached
         self.isCached = isCached
@@ -1076,6 +1090,7 @@ struct StreamAddonBehaviorHints: Decodable {
             self.videoSize = nil
         }
         self.filename = try? container.decodeIfPresent(String.self, forKey: .filename)
+        self.videoHash = try? container.decodeIfPresent(String.self, forKey: .videoHash)
         self.bingeGroup = try? container.decodeIfPresent(String.self, forKey: .bingeGroup)
 
         if let b = try? container.decodeIfPresent(Bool.self, forKey: .cached) {

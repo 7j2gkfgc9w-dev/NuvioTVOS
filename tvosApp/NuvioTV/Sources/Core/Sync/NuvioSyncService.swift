@@ -1185,6 +1185,7 @@ final class NuvioSyncManager: ObservableObject {
                     session: session,
                     remoteProfileId: remoteProfileId
                 )
+                print("[NuvioSync] pullWatchProgress: received \(remoteProgress.count) progress items from server for profile \(remoteProfileId)")
                 try ensureStillSyncing(profileId: activeProfile.id)
                 // Authoritative, deletions included. The account is this
                 // backend's source of truth, and a row deleted on another
@@ -1193,6 +1194,7 @@ final class NuvioSyncManager: ObservableObject {
                     remoteProgress,
                     syncStartedAt: progressPullStartedAt
                 )
+                print("[NuvioSync] pullWatchProgress reconcile result: saved=\(progressReconcile.saved), removed=\(progressReconcile.removedKeys.count) (\(progressReconcile.removedKeys)), didChange=\(progressReconcile.didChange)")
                 guard progressReconcile.saved else {
                     throw AuthError(message: "Watch progress could not be saved on this Apple TV.")
                 }
@@ -1201,11 +1203,13 @@ final class NuvioSyncManager: ObservableObject {
                     // The rebuild below returns early on an empty ledger without
                     // replacing the derived rows, which would leave the card for
                     // the title that was just deleted on screen.
+                    print("[NuvioSync] pullWatchProgress: ledger is now empty after removing keys -> clearing ContinueWatchingStore")
                     ContinueWatchingStore.replaceAll([])
                 }
-                if progressReconcile.didChange {
-                    await ContinueWatchingBuilder.rebuild(reason: "account pull")
-                }
+                // Watched marks, source visibility, and metadata may have changed
+                // even when the raw progress snapshot did not. Re-evaluate the
+                // derived row on every successful account refresh.
+                await ContinueWatchingBuilder.rebuild(reason: "account pull")
                 let uploadStatus = watchStateUploadsEnabled ? "uploads on" : "uploads off"
                 Self.progressSyncDiagnostic = "profile \(activeProfile.id), remote \(remoteProgress.count), "
                     + "\(uploadStatus); \(ContinueWatchingBuilder.diagnostic); "
@@ -1912,9 +1916,7 @@ enum ContinueWatchingSyncMapper {
         let style = existingDict["style"] as? String ?? "Card"
         let useEpisodeThumbnails = existingDict["use_episode_thumbnails_in_cw"] as? Bool ?? true
         let blurNextUp = existingDict["blur_continue_watching_next_up"] as? Bool ?? false
-        let existingDismissed = Set(existingDict["dismissedNextUpKeys"] as? [String] ?? [])
         let localDismissed = ContinueWatchingDismissStore.keys(profileId: localProfileId)
-        let mergedDismissed = Array(existingDismissed.union(localDismissed)).sorted()
         let showResumePromptOnLaunch = existingDict["showResumePromptOnLaunch"] as? Bool ?? true
         let sortMode = sortModeToWire(continueWatchingSort)
 
@@ -1925,7 +1927,7 @@ enum ContinueWatchingSyncMapper {
             "use_episode_thumbnails_in_cw": useEpisodeThumbnails,
             "show_unaired_next_up": showUnairedNextUp,
             "blur_continue_watching_next_up": blurNextUp,
-            "dismissedNextUpKeys": mergedDismissed,
+            "dismissedNextUpKeys": Array(localDismissed).sorted(),
             "showResumePromptOnLaunch": showResumePromptOnLaunch,
             "sort_mode": sortMode
         ]
@@ -2032,7 +2034,10 @@ enum PlayerSettingsSyncMapper {
         ("player_show_episodes", SettingsKey.playerShowEpisodes),
         ("player_show_sources", SettingsKey.playerShowSources),
         ("player_show_subtitles", SettingsKey.playerShowSubtitles),
-        ("seek_preview_enabled", SettingsKey.seekPreviewEnabled)
+        ("player_show_audio", SettingsKey.playerShowAudio),
+        ("seek_preview_enabled", SettingsKey.seekPreviewEnabled),
+        ("show_player_loading_status", SettingsKey.showLoadingStatus),
+        ("player_show_loading_status", SettingsKey.showLoadingStatus)
     ]
 
     static let localToRemoteKeyMappings: [(local: String, remote: String)] = [
@@ -2055,7 +2060,9 @@ enum PlayerSettingsSyncMapper {
         (SettingsKey.playerShowEpisodes, "player_show_episodes"),
         (SettingsKey.playerShowSources, "player_show_sources"),
         (SettingsKey.playerShowSubtitles, "player_show_subtitles"),
-        (SettingsKey.seekPreviewEnabled, "seek_preview_enabled")
+        (SettingsKey.playerShowAudio, "player_show_audio"),
+        (SettingsKey.seekPreviewEnabled, "seek_preview_enabled"),
+        (SettingsKey.showLoadingStatus, "show_player_loading_status")
     ]
 
     static func exportPayload(
@@ -2629,17 +2636,38 @@ fileprivate final class NuvioAPIClient {
         }
 
         let defaults = ProfileSettings.store(for: localProfileId)
-        let currentOrderData = defaults.data(forKey: SettingsKey.homeCatalogSyncedOrder)
-        let currentDisabledData = defaults.data(forKey: SettingsKey.homeCatalogDisabled)
-        let currentDisabledColData = defaults.data(forKey: SettingsKey.homeCollectionDisabled)
-        let currentCustomTitlesData = defaults.data(forKey: SettingsKey.homeCatalogCustomTitles)
+        let currentOrderData = HomeCatalogPayloadStore.data(
+            forKey: SettingsKey.homeCatalogSyncedOrder,
+            in: defaults,
+            profileID: localProfileId
+        )
+        let currentDisabledData = HomeCatalogPayloadStore.data(
+            forKey: SettingsKey.homeCatalogDisabled,
+            in: defaults,
+            profileID: localProfileId
+        )
+        let currentDisabledColData = HomeCatalogPayloadStore.data(
+            forKey: SettingsKey.homeCollectionDisabled,
+            in: defaults,
+            profileID: localProfileId
+        )
+        let currentCustomTitlesData = HomeCatalogPayloadStore.data(
+            forKey: SettingsKey.homeCatalogCustomTitles,
+            in: defaults,
+            profileID: localProfileId
+        )
         let currentShowType = defaults.object(forKey: SettingsKey.homeCatalogShowType) as? Bool
 
-        let newOrderData = try? JSONEncoder().encode(orderKeys)
-        let newDisabledData = try? JSONEncoder().encode(disabledKeys)
-        let newDisabledColData = try? JSONEncoder().encode(disabledCollectionIds)
-        let newCustomTitlesData = try? JSONEncoder().encode(customTitles)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let newOrderData = try? encoder.encode(orderKeys)
+        let newDisabledData = try? encoder.encode(disabledKeys)
+        let newDisabledColData = try? encoder.encode(disabledCollectionIds)
+        let newCustomTitlesData = try? encoder.encode(customTitles)
         let newShowType = payload.showCatalogType
+        guard let newOrderData, let newDisabledData, let newDisabledColData, let newCustomTitlesData else {
+            return false
+        }
 
         let didChange = (currentOrderData != newOrderData)
             || (currentDisabledData != newDisabledData)
@@ -2647,14 +2675,22 @@ fileprivate final class NuvioAPIClient {
             || (currentCustomTitlesData != newCustomTitlesData)
             || (currentShowType ?? true) != newShowType
 
-        if didChange {
-            if let newOrderData { defaults.set(newOrderData, forKey: SettingsKey.homeCatalogSyncedOrder) }
-            if let newDisabledData { defaults.set(newDisabledData, forKey: SettingsKey.homeCatalogDisabled) }
-            if let newDisabledColData { defaults.set(newDisabledColData, forKey: SettingsKey.homeCollectionDisabled) }
-            if let newCustomTitlesData { defaults.set(newCustomTitlesData, forKey: SettingsKey.homeCatalogCustomTitles) }
-            defaults.set(newShowType, forKey: SettingsKey.homeCatalogShowType)
-        }
-        return didChange
+        guard didChange else { return false }
+
+        let didPersist = HomeCatalogPayloadStore.writeBatch(
+            [
+                SettingsKey.homeCatalogSyncedOrder: newOrderData,
+                SettingsKey.homeCatalogDisabled: newDisabledData,
+                SettingsKey.homeCollectionDisabled: newDisabledColData,
+                SettingsKey.homeCatalogCustomTitles: newCustomTitlesData
+            ],
+            in: defaults,
+            profileID: localProfileId
+        )
+        guard didPersist else { return false }
+
+        defaults.set(newShowType, forKey: SettingsKey.homeCatalogShowType)
+        return true
     }
 
     /// Replaces the profile's collections blob (`sync_push_collections`).
@@ -3130,6 +3166,7 @@ fileprivate final class NuvioAPIClient {
             return entry
         }
         guard !payload.isEmpty else { return }
+        print("[NuvioSync] pushWatchProgress: pushing \(payload.count) progress records to server for remoteProfileId \(remoteProfileId): \(records.map { "\($0.progressKey) (pos=\($0.position)/\($0.duration))" })")
         try await rpcVoid(
             "sync_push_watch_progress",
             session: session,
@@ -3138,6 +3175,7 @@ fileprivate final class NuvioAPIClient {
                 "p_profile_id": remoteProfileId
             ]
         )
+        print("[NuvioSync] pushWatchProgress: successfully pushed \(payload.count) records")
         WatchProgressLedger.markPushed(keys: records.map(\.progressKey))
     }
 

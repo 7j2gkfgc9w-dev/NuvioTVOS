@@ -48,6 +48,13 @@ protocol CatalogRepository {
     /// after it opens so resume playback and early stream picks can keep filling
     /// an already-visible subtitle panel as slower providers finish.
     func subtitlesProgressively(id: String, type: String) -> AsyncStream<[NuvioSubtitle]>
+    func subtitlesProgressively(
+        id: String,
+        type: String,
+        videoHash: String?,
+        videoSize: Int64?,
+        filename: String?
+    ) -> AsyncStream<[NuvioSubtitle]>
 
     /// Progressive variant of `getStreams`: yields the accumulated stream list
     /// each time another add-on returns, so the picker can show the first
@@ -189,6 +196,16 @@ extension CatalogRepository {
     }
 
     func subtitlesProgressively(id: String, type: String) -> AsyncStream<[NuvioSubtitle]> {
+        subtitlesProgressively(id: id, type: type, videoHash: nil, videoSize: nil, filename: nil)
+    }
+
+    func subtitlesProgressively(
+        id: String,
+        type: String,
+        videoHash: String?,
+        videoSize: Int64?,
+        filename: String?
+    ) -> AsyncStream<[NuvioSubtitle]> {
         AsyncStream { continuation in
             continuation.finish()
         }
@@ -1332,7 +1349,13 @@ final class CinemetaCatalogRepository: CatalogRepository {
         }
     }
 
-    func subtitlesProgressively(id: String, type: String) -> AsyncStream<[NuvioSubtitle]> {
+    func subtitlesProgressively(
+        id: String,
+        type: String,
+        videoHash: String? = nil,
+        videoSize: Int64? = nil,
+        filename: String? = nil
+    ) -> AsyncStream<[NuvioSubtitle]> {
         let subtitleType = Self.isSeriesType(type) ? "series" : "movie"
 
         return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
@@ -1342,7 +1365,13 @@ final class CinemetaCatalogRepository: CatalogRepository {
 
                 await withTaskGroup(of: [NuvioSubtitle].self) { group in
                     for addon in addons {
-                        guard let url = addon.subtitleURL(type: subtitleType, id: id) else { continue }
+                        guard let url = addon.subtitleURL(
+                            type: subtitleType,
+                            id: id,
+                            videoHash: videoHash,
+                            videoSize: videoSize,
+                            filename: filename
+                        ) else { continue }
                         let name = addon.name
                         group.addTask { await Self.fetchSubtitles(from: url, source: name) }
                     }
@@ -1398,13 +1427,22 @@ final class CinemetaCatalogRepository: CatalogRepository {
     private func fetchSubtitleAddons(
         id: String,
         type: String,
-        addons: [StremioSubtitleAddon]
+        addons: [StremioSubtitleAddon],
+        videoHash: String? = nil,
+        videoSize: Int64? = nil,
+        filename: String? = nil
     ) async -> [NuvioSubtitle] {
         let subtitleType = Self.isSeriesType(type) ? "series" : "movie"
         var subtitles: [NuvioSubtitle] = []
 
         for addon in addons {
-            guard let subtitleURL = addon.subtitleURL(type: subtitleType, id: id) else { continue }
+            guard let subtitleURL = addon.subtitleURL(
+                type: subtitleType,
+                id: id,
+                videoHash: videoHash,
+                videoSize: videoSize,
+                filename: filename
+            ) else { continue }
             do {
                 let response: StremioSubtitleResponse = try await fetch(subtitleURL)
                 subtitles += (response.subtitles ?? []).compactMap { $0.toNuvioSubtitle(source: addon.name) }
@@ -2419,12 +2457,20 @@ private struct StremioSubtitleAddon {
     let name: String
     let manifestURL: URL
 
-    func subtitleURL(type: String, id: String) -> URL? {
-        AddonTransportUrls.buildResourceURL(
+    func subtitleURL(
+        type: String,
+        id: String,
+        videoHash: String? = nil,
+        videoSize: Int64? = nil,
+        filename: String? = nil
+    ) -> URL? {
+        AddonTransportUrls.buildSubtitleURL(
             manifestURL: manifestURL,
-            resource: "subtitles",
             type: type,
-            id: id
+            id: id,
+            videoHash: videoHash,
+            videoSize: videoSize,
+            filename: filename
         )
     }
 }

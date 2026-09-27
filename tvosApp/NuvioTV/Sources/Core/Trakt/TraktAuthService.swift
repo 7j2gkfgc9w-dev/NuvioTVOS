@@ -1199,6 +1199,7 @@ struct TraktProgressService {
 
         let profileId = ContinueWatchingStore.activeProfileId
         let source = sourceOverride ?? TraktSettingsStore.watchProgressSource
+        print("[TraktProgressService] recordLocalPlayback: meta=\(meta.id) S\(season.map(String.init) ?? "nil")E\(episode.map(String.init) ?? "nil"), pos=\(position)/\(duration), source=\(source.rawValue), notify=\(notify)")
         let completionPercent = source == .mdblist ? MdbListProgressService.completionPercent : Self.completionPercent
         // Going back to a title retires the removal the user made earlier, so a
         // provider row they are actively watching again is never hidden.
@@ -1268,6 +1269,7 @@ struct TraktProgressService {
         recordedNoLaterThan cutoff: Date? = nil,
         notify: Bool = false
     ) {
+        print("[TraktProgressService] forgetLocalPlayback: meta=\(meta.id) S\(season.map(String.init) ?? "nil")E\(episode.map(String.init) ?? "nil"), notify=\(notify)")
         let profileId = ContinueWatchingStore.activeProfileId
         let source = TraktSettingsStore.watchProgressSource
         let matchesRemoval: (ContinueWatchingItem) -> Bool = { item in
@@ -1663,6 +1665,7 @@ struct TraktProgressService {
         store: UserDefaults = ProfileSettings.current
     ) async -> Bool {
         let source = TraktSettingsStore.watchProgressSource(in: store)
+        print("[TraktProgressService] reportPlayback: action=\(action.rawValue), source=\(source.rawValue), meta=\(meta.id), pos=\(position)/\(duration)")
         if source == .simkl {
             return await SimklProgressService.reportPlayback(
                 meta: meta,

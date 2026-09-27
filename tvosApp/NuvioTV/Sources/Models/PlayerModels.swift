@@ -32,6 +32,25 @@ struct AudioTrack: Identifiable, Equatable {
     var detail: String = ""
 }
 
+enum EnhanceDialogueMode: String, CaseIterable, Identifiable {
+    case off
+    case enhance
+    case boost
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .off:
+            return L10n.string("action_off", fallback: "Off")
+        case .enhance:
+            return L10n.string("player_dialogue_enhance", fallback: "Enhance")
+        case .boost:
+            return L10n.string("player_dialogue_boost", fallback: "Boost")
+        }
+    }
+}
+
 enum PlaybackSpeed: Float, CaseIterable, Identifiable {
     case quarter = 0.25
     case half = 0.5
@@ -471,6 +490,7 @@ struct PreparedNextStream {
     var filename: String? = nil
     var addonName: String? = nil
     var videoSize: Int64? = nil
+    var videoHash: String? = nil
     var provider: String? = nil
     var bingeGroup: String? = nil
     var artworkURL: URL? = nil

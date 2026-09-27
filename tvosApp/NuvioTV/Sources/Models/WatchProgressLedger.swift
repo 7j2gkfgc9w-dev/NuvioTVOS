@@ -177,6 +177,7 @@ enum WatchProgressLedger {
     static func upsert(_ record: WatchProgressRecord) -> Bool {
         var current = records().filter { $0.progressKey != record.progressKey }
         current.append(record)
+        print("[WatchProgressLedger] upsert: key=\(record.progressKey), id=\(record.contentId), S\(record.season.map(String.init) ?? "nil")E\(record.episode.map(String.init) ?? "nil"), pos=\(record.position)/\(record.duration), isPendingPush=\(record.isPendingPush), totalRecords=\(current.count)")
         return persist(current)
     }
 
@@ -186,6 +187,7 @@ enum WatchProgressLedger {
         let removing = Set(keys)
         let remaining = records().filter { !removing.contains($0.progressKey) }
         guard remaining.count != records().count else { return true }
+        print("[WatchProgressLedger] remove: keys=\(keys), remainingRecords=\(remaining.count)")
         return persist(remaining)
     }
 
@@ -194,6 +196,7 @@ enum WatchProgressLedger {
     @discardableResult
     static func removeContent(id: String) -> Bool {
         let remaining = records().filter { $0.contentId != id }
+        print("[WatchProgressLedger] removeContent: id=\(id), remainingRecords=\(remaining.count)")
         return persist(remaining)
     }
 
@@ -208,7 +211,9 @@ enum WatchProgressLedger {
     @discardableResult
     static func mergeRemote(_ remote: [WatchProgressRecord]) -> Bool {
         guard !remote.isEmpty else { return true }
-        return persist(Array(merged(remote, into: records()).values))
+        let mergedResult = Array(merged(remote, into: records()).values)
+        print("[WatchProgressLedger] mergeRemote: received \(remote.count) remote records -> total \(mergedResult.count) records")
+        return persist(mergedResult)
     }
 
     /// Applies an account snapshot as authoritative, deletions included.
@@ -236,6 +241,7 @@ enum WatchProgressLedger {
         // mismatch. Never turn that ambiguity into destructive local data loss.
         // Explicit removals are still reconciled from non-empty snapshots.
         guard !remote.isEmpty else {
+            print("[WatchProgressLedger] reconcileRemote: remote snapshot is empty -> skipping reconciliation")
             return (true, [], false)
         }
 
@@ -251,8 +257,11 @@ enum WatchProgressLedger {
                 survivors.append(record)
             } else {
                 removedKeys.append(record.progressKey)
+                print("[WatchProgressLedger] reconcileRemote: DROPPING record \(record.progressKey) (contentId=\(record.contentId), pos=\(record.position)/\(record.duration)) - not in remoteKeys, isPendingPush=\(record.isPendingPush), lastWatchedAt=\(record.lastWatchedAt) <= syncStartedAt=\(syncStartedAt)")
             }
         }
+
+        print("[WatchProgressLedger] reconcileRemote: remote=\(remote.count), local=\(records().count), survivors=\(survivors.count), removed=\(removedKeys.count)")
 
         // A refresh that did not change the merged ledger (the common case on
         // a background pull of an account that has been quiet) must not
@@ -314,6 +323,7 @@ enum WatchProgressLedger {
             return copy
         }
         guard changed else { return }
+        print("[WatchProgressLedger] markPushed: cleared isPendingPush for \(keys.count) keys: \(keys)")
         _ = persist(updated)
     }
 
@@ -480,16 +490,26 @@ enum WatchProgressLedger {
     /// Rows that should appear as real resume progress, newest first and at most
     /// one per series. Mirrors `continueWatchingProgressEntries`.
     static func continueWatchingCandidates() -> [WatchProgressRecord] {
-        let inProgress = records().filter { record in
-            guard hasStarted(record), !isComplete(record) else { return false }
+        let allRecords = records()
+        let inProgress = allRecords.filter { record in
+            guard hasStarted(record) else {
+                print("[WatchProgressLedger] continueWatchingCandidates: rejected \(record.progressKey) - hasStarted=false (pos=\(record.position))")
+                return false
+            }
+            guard !isComplete(record) else {
+                print("[WatchProgressLedger] continueWatchingCandidates: rejected \(record.progressKey) - isComplete=true (pos=\(record.position)/\(record.duration))")
+                return false
+            }
             // An episode or movie already marked watched in WatchedStore has been completed
             // and should not be offered as an in-progress resume row.
             if record.isEpisode, let season = record.season, let episode = record.episode {
                 if WatchedStore.containsEpisode(metaId: record.contentId, season: season, episode: episode) {
+                    print("[WatchProgressLedger] continueWatchingCandidates: rejected episode \(record.progressKey) - already in WatchedStore")
                     return false
                 }
             } else if !record.isEpisode {
                 if WatchedStore.contains(metaId: record.contentId, type: record.contentType) {
+                    print("[WatchProgressLedger] continueWatchingCandidates: rejected movie \(record.progressKey) - already in WatchedStore")
                     return false
                 }
             }
@@ -503,7 +523,9 @@ enum WatchProgressLedger {
             .sorted { $0.lastWatchedAt > $1.lastWatchedAt }
             .filter { seenSeries.insert($0.contentId).inserted }
 
-        return (others + latestPerSeries).sorted { $0.lastWatchedAt > $1.lastWatchedAt }
+        let result = (others + latestPerSeries).sorted { $0.lastWatchedAt > $1.lastWatchedAt }
+        print("[WatchProgressLedger] continueWatchingCandidates: from \(allRecords.count) ledger records -> \(result.count) candidates: \(result.map(\.progressKey))")
+        return result
     }
 
     /// Finished episodes that should seed a "Next Up" suggestion, newest first
@@ -540,6 +562,8 @@ enum WatchProgressLedger {
                 selectedBySeries[candidate.contentId] = candidate
             }
         }
-        return selectedBySeries.values.sorted { $0.lastWatchedAt > $1.lastWatchedAt }
+        let result = selectedBySeries.values.sorted { $0.lastWatchedAt > $1.lastWatchedAt }
+        print("[WatchProgressLedger] upNextSeeds: found \(result.count) seeds: \(result.map(\.progressKey))")
+        return result
     }
 }

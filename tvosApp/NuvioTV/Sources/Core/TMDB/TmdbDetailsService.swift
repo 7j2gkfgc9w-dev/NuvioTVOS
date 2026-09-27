@@ -201,6 +201,7 @@ enum TmdbDetailsService {
         return try await session.data(for: request)
     }
 
+    static var currentApiKey: String? { apiKey }
     private static var apiKey: String? {
         let key = ProfileSettings.current.string(forKey: SettingsKey.tmdbApiKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
