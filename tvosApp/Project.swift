@@ -149,6 +149,10 @@ let appTarget: Target = .target(
         "NuvioTV/Resources/AppIcon.png",
         "NuvioTV/Fonts/inter_variable.ttf",
         "NuvioTV/SplashScreen.storyboard",
+        "NuvioTV/Resources/SceneModels/SFace.mlpackage",
+        "NuvioTV/Resources/SceneModels/YuNet.mlpackage",
+        "NuvioTV/Resources/SceneModels/SFace-LICENSE.txt",
+        "NuvioTV/Resources/SceneModels/YuNet-LICENSE.txt",
     ],
     entitlements: .file(path: "NuvioTV/NuvioTV.entitlements"),
     scripts: [

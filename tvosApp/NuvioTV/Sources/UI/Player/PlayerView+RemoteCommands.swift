@@ -8,49 +8,16 @@ extension PlayerView {
                 guard viewModel.currentErrorDiagnostic == nil else { return }
                 viewModel.togglePlayPause()
             }
-            .onMoveCommand { direction in
-                guard !isWakingFromBackground else { return }
-                // The Episodes/Sources sheet exclusively owns directional input.
-                // Do not let list navigation also seek or reveal player controls.
-                guard viewModel.sidePanel == nil, viewModel.currentErrorDiagnostic == nil else { return }
-
-                // Trackpad swipes also emit move commands; the pan recognizer sets
-                // moveSuppressed so a swipe does not double-fire as a skip.
-                if viewModel.moveSuppressed { return }
-
-                if viewModel.isScrubbing {
-                    switch direction {
-                    case .left:
-                        viewModel.scrubJump(-Double(max(viewModel.seekStepSeconds * 4, 60)))
-                    case .right:
-                        viewModel.scrubJump(Double(max(viewModel.seekStepSeconds * 4, 60)))
-                    default:
-                        viewModel.cancelScrub()
-                    }
-                    return
-                }
-
-                if viewModel.showPauseOverlay {
-                    switch direction {
-                    case .left, .right:
-                        viewModel.revealControls()
-                    default:
-                        viewModel.revealControls()
-                    }
-                    return
-                }
-
-                guard !viewModel.showControls else { return }
-                switch direction {
-                case .left, .right:
-                    if viewModel.status == .playing {
-                        viewModel.handleMoveSeek(direction: direction)
-                    }
-                default:
-                    viewModel.revealControls()
-                }
-            }
             .onExitCommand {
+                if viewModel.isSceneDetailVisible {
+                    viewModel.closeSceneDetail()
+                    return
+                }
+                if viewModel.showScenePanel {
+                    viewModel.closeScene()
+                    focusRemoteInput()
+                    return
+                }
                 // The panel handles its own exit; this fallback covers the frame
                 // where focus hasn't landed inside it yet.
                 if viewModel.showSettingsPanel {

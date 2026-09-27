@@ -79,21 +79,11 @@ struct NetflixSearchView: View {
         self.onLongPress = onLongPress
     }
 
-    @AppStorage("nuvio.keyboard.detectedLayout") private var detectedKeyboardMode: TVOSKeyboardLayoutMode = .linear
-
     var body: some View {
         ZStack(alignment: .top) {
             Color.nuvioBackground(amoled: amoled, body: bodyColor).ignoresSafeArea()
 
-            TVOSKeyboardLayoutDetector(layoutMode: $detectedKeyboardMode)
-                .frame(width: 0, height: 0)
-                .opacity(0)
-
-            if detectedKeyboardMode == .grid {
-                gridBody
-            } else {
-                linearBody
-            }
+            linearBody
         }
         .onAppear {
             viewModel.reloadRecent()
@@ -102,10 +92,8 @@ struct NetflixSearchView: View {
         .onChange(of: focusedItemID) { _, newValue in
             resultFocusGeneration &+= 1
             if let newValue {
-                if detectedKeyboardMode == .linear {
-                    withAnimation(.easeInOut(duration: 0.22)) {
-                        searchPresented = false
-                    }
+                withAnimation(.easeInOut(duration: 0.22)) {
+                    searchPresented = false
                 }
                 lastFocusedItemID = newValue
                 shouldRestoreFocus = false
@@ -207,69 +195,6 @@ struct NetflixSearchView: View {
         }
     }
 
-    // MARK: - Grid Layout
-
-    private var gridBody: some View {
-        gridNavigationBody
-            .padding(.top, 56)
-            .safeAreaPadding(.horizontal, TVLayout.rowLeading)
-    }
-
-    private var gridNavigationBody: some View {
-        NavigationStack {
-            VStack(alignment: .leading, spacing: 20) {
-                if viewModel.hasQuery {
-                    GridSearchSuggestionChips(
-                        query: $viewModel.searchText,
-                        suggestions: gridSuggestionTitles,
-                        isDisabled: overlayRestoreItemID != nil,
-                        onSubmit: {
-                            viewModel.performSearch(query: viewModel.searchText)
-                        }
-                    )
-                    typeFilterRow
-                        .disabled(overlayRestoreItemID != nil)
-                    resultsBody
-                } else {
-                    if !viewModel.recentSearches.isEmpty {
-                        recentRow
-                            .disabled(discoverOverlayTransitionActive)
-                    }
-                    if showDiscover {
-                        DiscoverSection(
-                            onContentClick: onContentClick,
-                            isBesideKeyboard: true,
-                            onLongPress: onLongPress,
-                            parentTransitionActive: $discoverOverlayTransitionActive
-                        )
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    } else {
-                        centeredState {
-                            messageState(
-                                icon: "rectangle.grid.2x2",
-                                title: L10n.string(
-                                    "search_start_subtitle_no_discover",
-                                    fallback: "Discover is disabled. Enter at least 2 characters"
-                                )
-                            )
-                        }
-                    }
-                }
-            }
-            .frame(maxWidth: NetflixSearchMetrics.gridContentWidth, alignment: .leading)
-            .padding(.trailing, NetflixSearchMetrics.pageInset)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 24)
-            .ignoresSafeArea(.container, edges: .bottom)
-            .searchable(
-                text: $viewModel.searchText,
-                prompt: L10n.string("search_placeholder", fallback: "Search movies & series")
-            )
-            .autocorrectionDisabled()
-            .toolbar(.hidden, for: .navigationBar)
-        }
-    }
-
     private func scheduleRestoreArm() {
         guard lastFocusedItemID != nil, focusedItemID == nil else { return }
         restoreArmTask?.cancel()
@@ -347,8 +272,7 @@ struct NetflixSearchView: View {
             focusedItemID = nil
             return
         }
-        let prefix = detectedKeyboardMode == .linear && focusedItemID?.hasPrefix("list:") == true
-            ? "list:" : "grid:"
+        let prefix = focusedItemID?.hasPrefix("list:") == true ? "list:" : "grid:"
         focusedItemID = "\(prefix)\(first.id)"
     }
 
@@ -470,22 +394,6 @@ struct NetflixSearchView: View {
         return viewModel.results.filter { !ContentReleasePolicy.isUnreleased($0) }
     }
 
-    private var gridSuggestionTitles: [String] {
-        let query = viewModel.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return [] }
-        let matchingRecent = viewModel.recentSearches.filter {
-            $0.localizedCaseInsensitiveContains(query)
-        }
-        let titles = viewModel.isLoading || viewModel.error != nil ? [] : visibleResults.map(\.name)
-        var seen = Set<String>()
-        return (titles + matchingRecent).filter { title in
-            let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty,
-                  trimmed.caseInsensitiveCompare(query) != .orderedSame else { return false }
-            return seen.insert(trimmed.lowercased()).inserted
-        }.prefix(8).map { $0 }
-    }
-
     private var resultsCountLabel: String {
         let count = visibleResults.count
         if count == 1 {
@@ -518,14 +426,12 @@ struct NetflixSearchView: View {
                     )
                 )
             }
-        } else if detectedKeyboardMode == .linear {
+        } else {
             HStack(alignment: .top, spacing: NetflixSearchMetrics.columnGap) {
                 resultsList
                 resultsGrid
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            resultsGrid
         }
     }
 
@@ -663,7 +569,7 @@ struct NetflixSearchView: View {
                 spacing: NetflixSearchMetrics.posterGap,
                 alignment: .top
             ),
-            count: detectedKeyboardMode == .grid ? NetflixSearchMetrics.gridColumnCount : 6
+            count: 6
         )
     }
 

@@ -26,6 +26,9 @@ extension PlayerView {
                 PlaybackWakeLock.acquire()
                 syncPlaybackWakeLock()
                 let cachedBinge = BingeGroupStore.load(seriesId: meta.id)
+                viewModel.reloadCurrentStream = reloadCurrentStream
+                viewModel.fetchPlaybackSources = fetchPlaybackSources
+                viewModel.resolvePlaybackStream = resolvePlaybackStream
                 viewModel.load(
                     url: url,
                     meta: meta,
@@ -39,6 +42,7 @@ extension PlayerView {
                     provider: provider,
                     filename: filename,
                     videoSize: videoSize,
+                    videoHash: videoHash,
                     cacheFileIdentity: cacheFileIdentity,
                     trickplayURL: trickplayURL,
                     currentEpisode: currentEpisode
@@ -46,12 +50,12 @@ extension PlayerView {
                 if subtitle != PlaybackMarkers.trailerSubtitle {
                     viewModel.fetchExternalSubtitles(
                         contentId: subtitleContentId,
-                        type: meta.isSeries ? "series" : meta.type
+                        type: meta.isSeries ? "series" : meta.type,
+                        videoHash: videoHash,
+                        videoSize: videoSize,
+                        filename: filename
                     )
                 }
-                viewModel.reloadCurrentStream = reloadCurrentStream
-                viewModel.fetchPlaybackSources = fetchPlaybackSources
-                viewModel.resolvePlaybackStream = resolvePlaybackStream
                 if let resolveNextStream {
                     viewModel.configureNextEpisode(
                         episodes: episodes,

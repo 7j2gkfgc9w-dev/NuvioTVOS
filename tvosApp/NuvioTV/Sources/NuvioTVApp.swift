@@ -23,8 +23,10 @@ struct NuvioTVApp: App {
         let diskCapacity = isLegacyDevice ? (60 * 1024 * 1024) : (150 * 1024 * 1024)
         URLCache.shared.memoryCapacity = memCapacity
         URLCache.shared.diskCapacity = diskCapacity
-        LargePayloadStore.purgeAllKnownPreferences()
-        UserDefaults.standard.set(true, forKey: SettingsKey.smoothFocus)
+        if HomeCatalogPayloadStore.migrateAllKnownPreferences() {
+            LargePayloadStore.purgeAllKnownPreferences()
+            UserDefaults.standard.set(true, forKey: SettingsKey.smoothFocus)
+        }
 
         #if canImport(AetherEngine)
         // Asynchronously prewarm AetherEngine so hardware deinterlace pipeline setup (~800ms)
@@ -332,6 +334,9 @@ struct ContentView: View {
     @State private var playbackEpisodes: [NuvioVideo] = []
     @State private var playbackCurrentEpisode: NuvioVideo?
     @State private var playbackOrigin: PlaybackOrigin = .main
+    @State private var playbackFilename: String?
+    @State private var playbackVideoSize: Int64?
+    @State private var playbackVideoHash: String?
     @State private var playbackCacheFileIdentity: PlaybackCacheFileIdentity?
     @State private var playbackDidStart = false
     @State private var reopenStreamPickerOnDetails = false
@@ -350,6 +355,7 @@ struct ContentView: View {
     /// Up) resolve their stream in place instead of opening Details first.
     @State private var isResolvingContinueWatchingStream = false
     @State private var resolvingContinueWatchingItem: ContinueWatchingItem?
+    @State private var continueWatchingLoadingMessage: String = L10n.string("player_searching_sources", fallback: "Searching sources…")
     @State private var continueWatchingPlaybackTask: Task<Void, Never>?
     @State private var pendingDeepLinkURL: URL?
     /// Details title to restore when leaving a production company browse.
@@ -1182,6 +1188,7 @@ struct ContentView: View {
         }
 
         resolvingContinueWatchingItem = item
+        continueWatchingLoadingMessage = L10n.string("player_searching_sources", fallback: "Searching sources…")
         PlaybackStartupTiming.start(title: item.meta.name)
         isResolvingContinueWatchingStream = true
         continueWatchingPlaybackTask = Task {
@@ -1213,6 +1220,7 @@ struct ContentView: View {
             }
 
             if let prepared {
+                continueWatchingLoadingMessage = L10n.string("player_loading_building", fallback: "Building player…")
                 continueWatchingPlaybackTask = nil
                 presentPlayback(
                     url: prepared.url,
@@ -1220,7 +1228,10 @@ struct ContentView: View {
                     subtitle: prepared.subtitleLine,
                     externalSubtitles: prepared.subtitles,
                     resumeFrom: startFromBeginning ? nil : Self.resumePosition(for: item),
-                    httpHeaders: prepared.httpHeaders
+                    httpHeaders: prepared.httpHeaders,
+                    filename: prepared.filename,
+                    videoSize: prepared.videoSize,
+                    videoHash: prepared.videoHash
                 )
                 isResolvingContinueWatchingStream = false
                 resolvingContinueWatchingItem = nil
@@ -1278,6 +1289,7 @@ struct ContentView: View {
     /// removal is also recorded on this device — that record is what makes the
     /// card stay gone until the title is watched again.
     private func removeFromContinueWatching(_ item: ContinueWatchingItem) {
+        print("[ContinueWatching][Home] removeFromContinueWatching called: metaId=\(item.meta.id), S\(item.season.map(String.init) ?? "nil")E\(item.episode.map(String.init) ?? "nil")")
         var keysToDelete = Set<String>()
         keysToDelete.insert(item.meta.id)
         let itemProgressKey = WatchProgressLedger.progressKey(
@@ -1321,7 +1333,10 @@ struct ContentView: View {
         httpHeaders: [String: String] = [:],
         origin: PlaybackOrigin = .main,
         customPlayer: ExternalPlayer? = nil,
-        cacheFileIdentity: PlaybackCacheFileIdentity? = nil
+        cacheFileIdentity: PlaybackCacheFileIdentity? = nil,
+        filename: String? = nil,
+        videoSize: Int64? = nil,
+        videoHash: String? = nil
     ) {
         let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
         let store = ProfileSettings.store(for: profileViewModel.activeProfile?.id)
@@ -1370,7 +1385,7 @@ struct ContentView: View {
         // Hand off to the external app only when it is actually installed
         // (`canOpenURL` needs its scheme in LSApplicationQueriesSchemes); if it
         // isn't, fall through to the built-in player instead of a dead launch.
-        let mediaFilename = ExternalPlayer.mediaFilename(
+        let mediaFilename = filename ?? ExternalPlayer.mediaFilename(
             meta: meta,
             season: meta.isSeries ? numbers?.season : nil,
             episode: meta.isSeries ? numbers?.episode : nil,
@@ -1403,7 +1418,10 @@ struct ContentView: View {
             externalSubtitles: externalSubtitles,
             resumeFrom: resumeFrom,
             origin: origin,
-            cacheFileIdentity: cacheFileIdentity
+            cacheFileIdentity: cacheFileIdentity,
+            filename: filename,
+            videoSize: videoSize,
+            videoHash: videoHash
         )
     }
 
@@ -1415,13 +1433,19 @@ struct ContentView: View {
         externalSubtitles: [NuvioSubtitle],
         resumeFrom: Double?,
         origin: PlaybackOrigin,
-        cacheFileIdentity: PlaybackCacheFileIdentity? = nil
+        cacheFileIdentity: PlaybackCacheFileIdentity? = nil,
+        filename: String? = nil,
+        videoSize: Int64? = nil,
+        videoHash: String? = nil
     ) {
         if PictureInPictureManager.shared.isPictureInPictureActive,
            PictureInPictureManager.shared.activeContext?.url != url {
             PictureInPictureManager.shared.invalidateSession()
         }
         playbackOrigin = origin
+        playbackFilename = filename
+        playbackVideoSize = videoSize
+        playbackVideoHash = videoHash
         playbackCacheFileIdentity = cacheFileIdentity
         playbackDidStart = false
         withAnimation(.easeInOut(duration: 0.28)) {
@@ -1440,6 +1464,9 @@ struct ContentView: View {
         PictureInPictureManager.shared.onRestoreUI = { [self] context, completion in
             withAnimation(.easeInOut(duration: 0.24)) {
                 self.playbackOrigin = context.playbackOrigin
+                self.playbackFilename = context.filename
+                self.playbackVideoSize = context.videoSize
+                self.playbackVideoHash = context.videoHash
                 self.playbackCacheFileIdentity = context.cacheFileIdentity
                 self.playbackEpisodes = context.episodes
                 self.playbackCurrentEpisode = context.currentEpisode
@@ -1648,7 +1675,7 @@ struct ContentView: View {
                     backdropUrl: item.meta.backgroundUrl ?? item.meta.posterUrl,
                     logoUrl: item.meta.logoUrl,
                     title: item.meta.name,
-                    message: L10n.string("player_status_starting_stream", fallback: "Starting stream")
+                    message: continueWatchingLoadingMessage
                 )
                 .transition(.opacity)
                 .zIndex(3)
@@ -1835,7 +1862,7 @@ struct ContentView: View {
                 reopenStreamPickerOnDetails = false
                 reopenStreamPickerEpisode = nil
             },
-            onPlayClick: { streamUrlString, httpHeaders, meta, subtitle, externalSubtitles, currentEpisode, episodes, player, cacheFileIdentity in
+            onPlayClick: { streamUrlString, httpHeaders, meta, subtitle, externalSubtitles, currentEpisode, episodes, player, cacheFileIdentity, filename, videoSize, videoHash in
                 if let url = URL(string: streamUrlString) {
                     let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
                     reopenStreamPickerOnDetails = false
@@ -1851,7 +1878,10 @@ struct ContentView: View {
                         httpHeaders: httpHeaders,
                         origin: .details,
                         customPlayer: player,
-                        cacheFileIdentity: cacheFileIdentity
+                        cacheFileIdentity: cacheFileIdentity,
+                        filename: filename,
+                        videoSize: videoSize,
+                        videoHash: videoHash
                     )
                 }
             },
@@ -2061,6 +2091,7 @@ struct ContentView: View {
                     filename: candidate.filename,
                     addonName: candidate.addonName,
                     videoSize: candidate.videoSize,
+                    videoHash: candidate.videoHash,
                     provider: providerName,
                     bingeGroup: candidate.bingeGroup ?? StreamQualityTags.syntheticBingeGroup(for: candidate)
                 )
@@ -2088,6 +2119,7 @@ struct ContentView: View {
                 filename: candidate.filename,
                 addonName: candidate.addonName,
                 videoSize: candidate.videoSize,
+                videoHash: candidate.videoHash,
                 provider: "Direct",
                 bingeGroup: candidate.bingeGroup ?? StreamQualityTags.syntheticBingeGroup(for: candidate)
             )
@@ -2212,6 +2244,7 @@ struct ContentView: View {
                 filename: stream.filename,
                 addonName: stream.addonName,
                 videoSize: stream.videoSize,
+                videoHash: stream.videoHash,
                 provider: providerName,
                 bingeGroup: bingeGroup
             )
@@ -2230,7 +2263,7 @@ struct ContentView: View {
         )
         return PreparedNextStream(
             url: url,
-                cacheFileIdentity: PlaybackCacheFileIdentity(infoHash: stream.effectiveInfoHash, fileIndex: stream.effectiveFileIdx),
+            cacheFileIdentity: PlaybackCacheFileIdentity(infoHash: stream.effectiveInfoHash, fileIndex: stream.effectiveFileIdx),
             httpHeaders: stream.httpHeaders ?? [:],
             subtitleLine: subtitleLine,
             subtitles: stream.subtitles,
@@ -2239,6 +2272,7 @@ struct ContentView: View {
             filename: stream.filename,
             addonName: stream.addonName,
             videoSize: stream.videoSize,
+            videoHash: stream.videoHash,
             provider: "Direct",
             bingeGroup: bingeGroup
         )
@@ -2328,6 +2362,9 @@ struct ContentView: View {
             externalSubtitles: externalSubtitles,
             resumeFrom: resumeFrom,
             playbackOrigin: playbackOrigin,
+            filename: isTrailer ? nil : playbackFilename,
+            videoSize: isTrailer ? nil : playbackVideoSize,
+            videoHash: isTrailer ? nil : playbackVideoHash,
             cacheFileIdentity: isTrailer ? nil : playbackCacheFileIdentity,
             episodes: isTrailer ? [] : playbackEpisodes,
             currentEpisode: isTrailer ? nil : playbackCurrentEpisode,
@@ -2380,6 +2417,16 @@ struct ContentView: View {
                     seriesMetaId: meta.isSeries ? meta.id : nil,
                     profileId: profileViewModel.activeProfile?.id
                 )
+            },
+            onRequestSources: isTrailer ? nil : {
+                Task {
+                    await TorrentEngineManager.shared.stopActiveStream()
+                }
+                withAnimation(.easeInOut(duration: 0.28)) {
+                    reopenStreamPickerOnDetails = true
+                    reopenStreamPickerEpisode = playbackCurrentEpisode
+                    openDetailsRoot(id: meta.id, type: meta.type)
+                }
             },
             onFinished: isTrailer ? {
                 withAnimation(.easeInOut(duration: 0.24)) {
@@ -2434,7 +2481,10 @@ struct ContentView: View {
                     subtitle: prepared.subtitleLine,
                     externalSubtitles: prepared.subtitles,
                     resumeFrom: nil,
-                    httpHeaders: prepared.httpHeaders
+                    httpHeaders: prepared.httpHeaders,
+                    filename: prepared.filename,
+                    videoSize: prepared.videoSize,
+                    videoHash: prepared.videoHash
                 )
             } else {
                 withAnimation(.easeInOut(duration: 0.28)) {
@@ -2881,7 +2931,7 @@ private struct TVMainTabView: View {
             NativeSearchView(
                 viewModel: searchViewModel,
                 showDiscover: discoverLocation == "Search",
-                forcedLayoutMode: .grid,
+                forcedLayoutMode: .linear,
                 isFullScreenOverlayPresented: isFullScreenOverlayPresented,
                 detailsDidDisappearGeneration: detailsDidDisappearGeneration,
                 onContentClick: onNavigateToDetails,
@@ -5366,10 +5416,15 @@ struct TVHomeView: View {
     }
 
     private func shouldDisplayContinueWatchingItem(_ item: ContinueWatchingItem) -> Bool {
-        (!item.isUpNextEntry || ContinueWatchingFeatureFlags.nextUpCardsEnabled)
-            && isVisible(item.meta)
-            && (showUnairedNextUp || !item.isUpNextEntry || item.hasAired || item.isAiringToday)
-            && !ContinueWatchingDismissStore.isDismissed(item)
+        let isNextUpAllowed = !item.isUpNextEntry || ContinueWatchingFeatureFlags.nextUpCardsEnabled
+        let isMetaVisible = isVisible(item.meta)
+        let isAiredAllowed = showUnairedNextUp || !item.isUpNextEntry || item.hasAired || item.isAiringToday
+        let notDismissed = !ContinueWatchingDismissStore.isDismissed(item)
+        let shouldDisplay = isNextUpAllowed && isMetaVisible && isAiredAllowed && notDismissed
+        if !shouldDisplay {
+            print("[ContinueWatching][Home] shouldDisplayContinueWatchingItem=false for \(item.meta.id) (title: \(item.meta.name)) - isNextUpAllowed=\(isNextUpAllowed), isMetaVisible=\(isMetaVisible), isAiredAllowed=\(isAiredAllowed), notDismissed=\(notDismissed)")
+        }
+        return shouldDisplay
     }
 
     private func requestLoadingFocus() {
@@ -6311,6 +6366,7 @@ struct TVHomeView: View {
     private func refreshContinueWatching() {
         TVHomeDebugTrace.measure("home.refreshContinueWatching") {
             guard !usesRemoteProgress else {
+                print("[ContinueWatching][Home] refreshContinueWatching: usesRemoteProgress=true (\(selectedProgressSource.rawValue))")
                 if displayedProgressSource != selectedProgressSource {
                     setContinueWatching([])
                     displayedProgressSource = selectedProgressSource
@@ -6347,6 +6403,7 @@ struct TVHomeView: View {
                 let items = orderedItems.map { $0.item }
                 return items.filter(shouldDisplayContinueWatchingItem)
             }
+            print("[ContinueWatching][Home] refreshContinueWatching: paged=\(ContinueWatchingBuilder.pagedItems.count), stored=\(storedItems.count), merged=\(byId.count), visible=\(visibleItems.count) (\(visibleItems.map { "\($0.meta.id) (pos=\($0.position)/\($0.duration), upNext=\($0.isUpNextEntry))" }))")
             setContinueWatching(visibleItems)
             displayedProgressSource = .nuvioSync
             #if DEBUG
@@ -6453,10 +6510,12 @@ struct TVHomeView: View {
             // The ledger this just read is only as fresh as the last account
             // pull. Ask for a new one; it lands via the store's change
             // notification, which already refreshes the row.
+            print("[ContinueWatching][Home] refreshContinueWatchingFromSelectedSource: triggering account refresh for local ledger")
             onRequestAccountRefresh()
             return
         }
 
+        print("[ContinueWatching][Home] refreshContinueWatchingFromSelectedSource: fetching from remote provider \(source.rawValue)")
         let items = await TraktProgressService.fetchContinueWatching(
             repository: repository,
             source: source
@@ -6474,6 +6533,7 @@ struct TVHomeView: View {
             return
         }
         guard let items else {
+            print("[ContinueWatching][Home] refreshContinueWatchingFromSelectedSource: remote returned nil")
             return
         }
         // The row shows one card per title, but a remote provider can return a
@@ -6486,6 +6546,7 @@ struct TVHomeView: View {
             shouldDisplayContinueWatchingItem($0)
                 && seenMetaIds.insert($0.meta.id).inserted
         }
+        print("[ContinueWatching][Home] refreshContinueWatchingFromSelectedSource: remote returned \(items.count) items -> visible \(visibleItems.count)")
         setContinueWatching(visibleItems)
         displayedProgressSource = source
 
@@ -6832,11 +6893,7 @@ enum TVHomeCatalogOrder {
     }
 
     static func customCatalogTitles() -> [String: String] {
-        guard let data = ProfileSettings.current.data(forKey: SettingsKey.homeCatalogCustomTitles),
-              let titles = try? JSONDecoder().decode([String: String].self, from: data) else {
-            return [:]
-        }
-        return titles
+        HomeCatalogPayloadStore.customCatalogTitles()
     }
 
     static func customTitle(forCatalogKey key: String) -> String? {
@@ -6847,11 +6904,11 @@ enum TVHomeCatalogOrder {
 
     static func setCustomCatalogTitles(_ titles: [String: String]) {
         guard let data = try? JSONEncoder().encode(titles) else { return }
-        ProfileSettings.current.set(data, forKey: SettingsKey.homeCatalogCustomTitles)
+        _ = HomeCatalogPayloadStore.write(data, forKey: SettingsKey.homeCatalogCustomTitles)
     }
 
     static func savedOrder() -> [String] {
-        guard let data = ProfileSettings.current.data(forKey: SettingsKey.homeCatalogOrder),
+        guard let data = HomeCatalogPayloadStore.data(forKey: SettingsKey.homeCatalogOrder),
               let keys = try? JSONDecoder().decode([String].self, from: data) else { return [] }
         return normalizedOrder(keys)
     }
@@ -6859,14 +6916,14 @@ enum TVHomeCatalogOrder {
     static func save(_ keys: [String]) {
         let keys = normalizedOrder(keys)
         guard let data = try? JSONEncoder().encode(keys) else { return }
-        ProfileSettings.current.set(data, forKey: SettingsKey.homeCatalogOrder)
+        guard HomeCatalogPayloadStore.write(data, forKey: SettingsKey.homeCatalogOrder) else { return }
         NotificationCenter.default.post(name: changedNotification, object: nil)
     }
 
     static func clearOrder() {
-        ProfileSettings.current.removeObject(forKey: SettingsKey.homeCatalogOrder)
-        ProfileSettings.current.removeObject(forKey: SettingsKey.homeCatalogSyncedOrder)
-        ProfileSettings.current.removeObject(forKey: SettingsKey.homeCatalogCustomTitles)
+        HomeCatalogPayloadStore.remove(forKey: SettingsKey.homeCatalogOrder)
+        HomeCatalogPayloadStore.remove(forKey: SettingsKey.homeCatalogSyncedOrder)
+        HomeCatalogPayloadStore.remove(forKey: SettingsKey.homeCatalogCustomTitles)
         ProfileSettings.current.removeObject(forKey: SettingsKey.homeCatalogTitles)
         let storageKey = snapshotStorageKey(for: ProfileSettings.current)
         LargePayloadStore.remove(key: storageKey, directory: snapshotDirectoryName)
@@ -6876,7 +6933,7 @@ enum TVHomeCatalogOrder {
     }
 
     static func syncedOrder() -> [String] {
-        guard let data = ProfileSettings.current.data(forKey: SettingsKey.homeCatalogSyncedOrder),
+        guard let data = HomeCatalogPayloadStore.data(forKey: SettingsKey.homeCatalogSyncedOrder),
               let keys = try? JSONDecoder().decode([String].self, from: data) else { return [] }
         return normalizedOrder(keys)
     }
@@ -6910,7 +6967,7 @@ enum TVHomeCatalogOrder {
     /// from Home on another device, pulled from the account. The repository
     /// consults this to drop hidden catalog rows before building Home.
     static func disabledCatalogKeys() -> Set<String> {
-        guard let data = ProfileSettings.current.data(forKey: SettingsKey.homeCatalogDisabled),
+        guard let data = HomeCatalogPayloadStore.data(forKey: SettingsKey.homeCatalogDisabled),
               let keys = try? JSONDecoder().decode([String].self, from: data) else { return [] }
         return Set(keys)
     }
@@ -6941,7 +6998,7 @@ enum TVHomeCatalogOrder {
 
     /// Collection ids the user has hidden from Home on another device.
     static func disabledCollectionIds() -> Set<String> {
-        guard let data = ProfileSettings.current.data(forKey: SettingsKey.homeCollectionDisabled),
+        guard let data = HomeCatalogPayloadStore.data(forKey: SettingsKey.homeCollectionDisabled),
               let keys = try? JSONDecoder().decode([String].self, from: data) else { return [] }
         return Set(keys)
     }
@@ -6949,7 +7006,7 @@ enum TVHomeCatalogOrder {
     /// Account catalog keys in the account's Home order → position, used by the
     /// repository to order the add-on catalog rows. Empty when nothing synced.
     static func syncedCatalogOrderIndex() -> [String: Int] {
-        guard let data = ProfileSettings.current.data(forKey: SettingsKey.homeCatalogSyncedOrder),
+        guard let data = HomeCatalogPayloadStore.data(forKey: SettingsKey.homeCatalogSyncedOrder),
               let keys = try? JSONDecoder().decode([String].self, from: data) else { return [:] }
         var index: [String: Int] = [:]
         for (position, key) in keys.enumerated() where index[key] == nil {
@@ -7169,7 +7226,7 @@ enum TVHomeCatalogOrder {
             return []
         }
         let customTitles: [String: String]
-        if let customData = settings.data(forKey: SettingsKey.homeCatalogCustomTitles),
+        if let customData = HomeCatalogPayloadStore.data(forKey: SettingsKey.homeCatalogCustomTitles, in: settings),
            let decoded = try? JSONDecoder().decode([String: String].self, from: customData) {
             customTitles = decoded
         } else {
@@ -7372,7 +7429,18 @@ enum TVHomeCatalogOrder {
 
     private static func persist(_ keys: Set<String>, forKey key: String) {
         guard let data = try? JSONEncoder().encode(Array(keys).sorted()) else { return }
-        ProfileSettings.current.set(data, forKey: key)
+        let usesFileStorage = [
+            SettingsKey.homeCatalogOrder,
+            SettingsKey.homeCatalogSyncedOrder,
+            SettingsKey.homeCatalogDisabled,
+            SettingsKey.homeCollectionDisabled,
+            SettingsKey.homeCatalogCustomTitles
+        ].contains(key)
+        if usesFileStorage {
+            _ = HomeCatalogPayloadStore.write(data, forKey: key)
+        } else {
+            ProfileSettings.current.set(data, forKey: key)
+        }
     }
 }
 

@@ -14,12 +14,15 @@ extension PlayerView {
             remoteTouchCatcherLayer
             remoteSeekPressCatcherLayer
             playerStatusOverlay
+                .zIndex(10)
             playerToastLayer
             focusSinkLayer
             pauseOverlayLayer
             skipSegmentLayer
             nextEpisodeLayer
             playerControlsLayer
+            scenePanelLayer
+            sceneDetailLayer
             settingsPanelLayer
             sidePanelLayer
             debugOverlayLayer
@@ -55,6 +58,7 @@ extension PlayerView {
                         aspectMode: viewModel.aspectMode,
                         style: viewModel.subtitleStyle
                     )
+                    .offset(y: viewModel.showScenePanel ? -430 : 0)
                     .ignoresSafeArea(edges: viewModel.postPlayState.isVisible ? [] : .all)
                 } else {
                     MPVSubtitleOverlay(
@@ -63,6 +67,7 @@ extension PlayerView {
                         aspectMode: viewModel.aspectMode,
                         style: viewModel.subtitleStyle
                     )
+                    .offset(y: viewModel.showScenePanel ? -430 : 0)
                     .ignoresSafeArea(edges: viewModel.postPlayState.isVisible ? [] : .all)
                 }
 
@@ -237,6 +242,7 @@ extension PlayerView {
                     && !viewModel.showNextEpisodeCard
                     && !viewModel.showSkipSegmentCard
                     && !viewModel.showSettingsPanel
+                    && !viewModel.showScenePanel
                     && !viewModel.postPlayState.isVisible
                     && viewModel.sidePanel == nil
             )
@@ -251,7 +257,67 @@ extension PlayerView {
                     viewModel.togglePlayPause()
                 }
             }
+            .onMoveCommand { direction in
+                guard !isWakingFromBackground else { return }
+                if viewModel.moveSuppressed { return }
+                if viewModel.showPauseOverlay {
+                    viewModel.revealControls()
+                    return
+                }
+                guard !viewModel.showControls else { return }
+                switch direction {
+                case .left, .right:
+                    if viewModel.status == .playing {
+                        viewModel.handleMoveSeek(direction: direction)
+                    }
+                case .down:
+                    if viewModel.isSceneEnabled {
+                        viewModel.openScene()
+                    } else {
+                        viewModel.revealControls()
+                    }
+                default:
+                    viewModel.revealControls()
+                }
+            }
             .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    var scenePanelLayer: some View {
+        if viewModel.showScenePanel {
+            ScenePanelView(
+                viewModel: viewModel.sceneViewModel,
+                onDismiss: {
+                    withAnimation(.playerControls) {
+                        viewModel.closeScene()
+                        focusRemoteInput()
+                    }
+                },
+                onPlayNextEpisode: {
+                    withAnimation(.playerControls) {
+                        viewModel.closeScene()
+                        viewModel.playNextEpisode()
+                    }
+                }
+            )
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .zIndex(15)
+        }
+    }
+
+    @ViewBuilder
+    var sceneDetailLayer: some View {
+        if let item = viewModel.sceneViewModel.selectedDetailItem {
+            SceneDetailView(
+                item: item,
+                onDismiss: {
+                    viewModel.closeSceneDetail()
+                }
+            )
+            .transition(.opacity)
+            .zIndex(16)
+        }
     }
 
     @ViewBuilder
@@ -396,15 +462,17 @@ extension PlayerView {
 
     @ViewBuilder
     var playerControlsLayer: some View {
-        let isSeekingOrControlsVisible = viewModel.showControls || viewModel.isScrubbing || viewModel.isHoldingSeek || viewModel.pendingSeekDelta != 0
-        PlayerControls(
-            viewModel: viewModel,
-            isSkipSegmentFocused: skipSegmentFocused,
-            isNextEpisodeFocused: nextEpisodeFocused || cancelAutoPlayFocused,
-            requestedFocus: $requestedControlFocus,
-            onFocusSkipSegment: { focusSkipSegment() },
-            onFocusNextEpisode: { focusNextEpisode() }
-        )
+        if didReportPlaybackStarted, viewModel.currentErrorDiagnostic == nil {
+            let isSeekingOrControlsVisible = (viewModel.showControls || viewModel.isScrubbing || viewModel.isHoldingSeek || viewModel.pendingSeekDelta != 0) && !viewModel.showScenePanel
+            PlayerControls(
+                viewModel: viewModel,
+                isSkipSegmentFocused: skipSegmentFocused,
+                isNextEpisodeFocused: nextEpisodeFocused || cancelAutoPlayFocused,
+                requestedFocus: $requestedControlFocus,
+                onFocusSkipSegment: { focusSkipSegment() },
+                onFocusNextEpisode: { focusNextEpisode() }
+            )
+            .offset(y: viewModel.showScenePanel ? -160 : 0)
             .opacity(
                 isSeekingOrControlsVisible
                     && didReportPlaybackStarted
@@ -428,6 +496,7 @@ extension PlayerView {
                     && !viewModel.showSettingsPanel
                     && !viewModel.showPauseOverlay
             )
+            .disabled(viewModel.showScenePanel)
             .animation(.playerControls, value: viewModel.showControls)
             .animation(.playerControls, value: didReportPlaybackStarted)
             .animation(.playerControls, value: viewModel.isSwitchingSource)
@@ -436,6 +505,8 @@ extension PlayerView {
             .animation(.playerControls, value: viewModel.isHoldingSeek)
             .animation(.playerControls, value: viewModel.pendingSeekDelta)
             .animation(.playerControls, value: viewModel.showPauseOverlay)
+            .animation(.playerControls, value: viewModel.showScenePanel)
+        }
     }
 
     @ViewBuilder

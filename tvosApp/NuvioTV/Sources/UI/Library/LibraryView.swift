@@ -270,8 +270,6 @@ public struct LibraryView: View {
                 restoreArmTask?.cancel()
                 lastFocusedItemID = newValue
                 shouldRestoreFocus = false
-                // Restoration complete -- lift the focus restriction.
-                if isEnabled, newValue == overlayRestoreItemID { overlayRestoreItemID = nil }
             } else if lastFocusedItemID != nil {
                 scheduleRestoreArm()
             }
@@ -357,6 +355,11 @@ public struct LibraryView: View {
                                 item: item,
                                 externalFocus: $focusedItemID,
                                 retainFocusAppearance: overlayRestoreItemID == item.id,
+                                onFocus: {
+                                    if overlayRestoreItemID == item.id {
+                                        overlayRestoreItemID = nil
+                                    }
+                                },
                                 onLongPress: onLongPress.map { cb in { cb(item.asNuvioMeta) } }
                             ) {
                                 overlayRestoreItemID = item.id
@@ -667,6 +670,7 @@ struct LibraryItemButton: View {
     let item: StremioMeta
     var externalFocus: FocusState<String?>.Binding? = nil
     var retainFocusAppearance = false
+    var onFocus: (() -> Void)? = nil
     var onLongPress: (() -> Void)? = nil
     let action: () -> Void
 
@@ -736,6 +740,11 @@ struct LibraryItemButton: View {
             meta: item.asNuvioMeta,
             onOpenDetails: action
         )
+        .onChange(of: isFocused) { _, focused in
+            if focused {
+                onFocus?()
+            }
+        }
         .animation(smoothFocus ? .spring(response: 0.28, dampingFraction: 0.75) : nil, value: showsFocusedAppearance)
         .zIndex(showsFocusedAppearance ? 1 : 0)
     }

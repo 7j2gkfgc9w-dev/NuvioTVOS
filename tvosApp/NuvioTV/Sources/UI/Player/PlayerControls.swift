@@ -7,6 +7,7 @@ enum PlayerControlFocus: Hashable {
     case episodes
     case sources
     case subtitles
+    case audio
     case settings
     case timeline
 }
@@ -25,6 +26,7 @@ struct PlayerControls: View {
     @AppStorage(SettingsKey.playerShowEpisodes) private var playerShowEpisodes = true
     @AppStorage(SettingsKey.playerShowSources) private var playerShowSources = true
     @AppStorage(SettingsKey.playerShowSubtitles) private var playerShowSubtitles = true
+    @AppStorage(SettingsKey.playerShowAudio) private var playerShowAudio = true
 
     var body: some View {
         GlassControlsContainer {
@@ -176,6 +178,7 @@ struct PlayerControls: View {
             && !viewModel.isSwitchingSource
             && !viewModel.showPauseOverlay
             && !viewModel.showSettingsPanel
+            && !viewModel.showScenePanel
             && !viewModel.postPlayState.isVisible
             && viewModel.sidePanel == nil
     }
@@ -187,12 +190,17 @@ struct PlayerControls: View {
         if viewModel.canShowEpisodesPanel && playerShowEpisodes { order.append(.episodes) }
         if viewModel.canShowSourcesPanel && playerShowSources { order.append(.sources) }
         if canShowSubtitlePicker && playerShowSubtitles { order.append(.subtitles) }
+        if canShowAudioPicker && playerShowAudio { order.append(.audio) }
         order.append(.settings)
         return order
     }
 
     private var canShowSubtitlePicker: Bool {
         !subtitlePanelOptions(for: viewModel).isEmpty
+    }
+
+    private var canShowAudioPicker: Bool {
+        !viewModel.audioTracks.isEmpty || isPlaybackStarted
     }
 
     private var subtitleNoneOption: SubtitlePanelOption? {
@@ -264,11 +272,15 @@ struct PlayerControls: View {
                 }
             } else if viewModel.showNextEpisodeCard {
                 onFocusNextEpisode()
+            } else {
+                moveFocus(to: origin)
             }
         case .down:
             viewModel.cancelMoveSeekTracking()
             if origin != .timeline, !viewModel.isLiveStream {
                 moveFocus(to: .timeline)
+            } else if origin == .timeline, viewModel.isSceneEnabled {
+                viewModel.openScene()
             }
         case .left:
             if origin == .timeline, !viewModel.isLiveStream {
@@ -401,6 +413,10 @@ struct PlayerControls: View {
 
             if canShowSubtitlePicker && playerShowSubtitles {
                 subtitleMenuButton
+            }
+
+            if canShowAudioPicker && playerShowAudio {
+                audioMenuButton
             }
 
             glassIconButton(
@@ -624,6 +640,163 @@ struct PlayerControls: View {
         }
     }
 
+    private var audioMenuButton: some View {
+        let isFocused = focusedControl == .audio
+
+        return Menu {
+            Section(L10n.string("player_audio_adjustments", fallback: "Audio Adjustments")) {
+                Menu {
+                    ForEach(EnhanceDialogueMode.allCases) { mode in
+                        Button {
+                            viewModel.setEnhanceDialogueMode(mode)
+                        } label: {
+                            audioMenuItem(
+                                title: mode.title,
+                                isSelected: viewModel.enhanceDialogueMode == mode
+                            )
+                        }
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(L10n.string("player_enhance_dialogue", fallback: "Enhance Dialogue"))
+                        Text(viewModel.enhanceDialogueMode.title)
+                    }
+                }
+
+                Button {
+                    viewModel.toggleReduceLoudSounds()
+                } label: {
+                    audioMenuItem(
+                        title: L10n.string("player_reduce_loud_sounds", fallback: "Reduce Loud Sounds"),
+                        isSelected: viewModel.isReduceLoudSoundsActive
+                    )
+                }
+            }
+
+            if !viewModel.audioTracks.isEmpty {
+                Section(L10n.string("player_audio_tracks", fallback: "Audio Tracks")) {
+                    ForEach(orderedAudioTracks) { track in
+                        Button {
+                            viewModel.selectAudio(track)
+                        } label: {
+                            audioMenuItem(
+                                title: audioMenuTrackTitle(for: track),
+                                isSelected: track.isSelected
+                            )
+                        }
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "waveform")
+                .font(.system(size: 28, weight: .semibold))
+                .foregroundColor(isFocused ? .black : .white)
+                .frame(width: 70, height: 70)
+                .modifier(PlayerGlassCircleButtonBackground(filled: isFocused))
+                .shadow(color: .black.opacity(0.82), radius: 14, x: 0, y: 7)
+                .frame(width: 70, height: 70)
+                .clipShape(Circle())
+                .contentShape(Circle())
+        }
+        .menuStyle(.borderlessButton)
+        .focused($focusedControl, equals: .audio)
+        .focusEffectDisabledIfAvailable()
+        .onMoveCommand { direction in
+            handleMove(direction, from: .audio)
+        }
+        .scaleEffect(isFocused ? 1.06 : 1.0)
+        .animation(.easeOut(duration: 0.14), value: isFocused)
+        .id("audio_button")
+    }
+
+    private func audioMenuItem(title: String, isSelected: Bool) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            if isSelected {
+                Image(systemName: "checkmark")
+            }
+        }
+    }
+
+    private func audioMenuTrackTitle(for track: AudioTrack) -> String {
+        let rawName = track.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawLang = track.language.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawLangName = track.languageName.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let langIdentifier = !rawLang.isEmpty ? rawLang : rawLangName
+        let humanLanguage = SubtitleLanguagePreferences.humanLanguageName(from: langIdentifier)
+
+        // 1. If name is completely empty or just generic "Track 1" / "Track 2"
+        let isGenericTrack = rawName.isEmpty || rawName.range(of: #"^Track\s*\d+$"#, options: [.regularExpression, .caseInsensitive]) != nil
+        if isGenericTrack {
+            if !humanLanguage.isEmpty {
+                return humanLanguage
+            }
+            return rawName.isEmpty ? L10n.string("player_track_format", fallback: "Track \(track.id)") : rawName
+        }
+
+        // 2. If name is just the language code (e.g. "eng", "en", "fra", "nob")
+        if (!rawLang.isEmpty && rawName.caseInsensitiveCompare(rawLang) == .orderedSame) ||
+           (!rawLangName.isEmpty && rawName.caseInsensitiveCompare(rawLangName) == .orderedSame) {
+            return !humanLanguage.isEmpty ? humanLanguage : rawName.capitalized
+        }
+
+        // 3. If name starts with the language code (e.g. "eng (DTS-HD MA 5.1)", "eng [Original]", "eng - 5.1")
+        if !humanLanguage.isEmpty {
+            let codeToCheck = !rawLang.isEmpty ? rawLang : rawLangName
+            if !codeToCheck.isEmpty {
+                let pattern = #"^"# + NSRegularExpression.escapedPattern(for: codeToCheck) + #"\b[\s:_\-]*"#
+                if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+                    let range = NSRange(rawName.startIndex..<rawName.endIndex, in: rawName)
+                    if let match = regex.firstMatch(in: rawName, options: [], range: range) {
+                        let startIndex = rawName.index(rawName.startIndex, offsetBy: match.range.length)
+                        let suffix = String(rawName[startIndex...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                        if suffix.isEmpty {
+                            return humanLanguage
+                        } else if suffix.hasPrefix("(") || suffix.hasPrefix("[") {
+                            return "\(humanLanguage) \(suffix)"
+                        } else {
+                            return "\(humanLanguage) (\(suffix))"
+                        }
+                    }
+                }
+            }
+
+            // 4. If name already contains the full language name (e.g. "English (Original)")
+            if rawName.localizedCaseInsensitiveContains(humanLanguage) {
+                return rawName
+            }
+
+            // 5. If name is another descriptor without language (e.g. "Director's Commentary" or "DTS 5.1")
+            return "\(humanLanguage) (\(rawName))"
+        }
+
+        return rawName
+    }
+
+    private var orderedAudioTracks: [AudioTrack] {
+        let preferred = SubtitleLanguagePreferences.preferredAudioLanguage(meta: viewModel.activeMeta)
+        return viewModel.audioTracks.enumerated().sorted { lhs, rhs in
+            let lhsPreferred = preferred.map { audioTrack(lhs.element, matches: $0) } ?? false
+            let rhsPreferred = preferred.map { audioTrack(rhs.element, matches: $0) } ?? false
+            if lhsPreferred != rhsPreferred { return lhsPreferred }
+
+            let lhsLanguage = lhs.element.languageName.isEmpty ? lhs.element.name : lhs.element.languageName
+            let rhsLanguage = rhs.element.languageName.isEmpty ? rhs.element.name : rhs.element.languageName
+            let comparison = lhsLanguage.localizedCaseInsensitiveCompare(rhsLanguage)
+            if comparison != .orderedSame { return comparison == .orderedAscending }
+            return lhs.offset < rhs.offset
+        }
+        .map(\.element)
+    }
+
+    private func audioTrack(_ track: AudioTrack, matches language: String) -> Bool {
+        SubtitleLanguagePreferences.matches(track.language, target: language) ||
+        SubtitleLanguagePreferences.matches(track.languageName, target: language) ||
+        SubtitleLanguagePreferences.matches(track.name, target: language)
+    }
+
     private func selectSubtitlePickerOption(_ option: SubtitlePanelOption) {
         switch option.kind {
         case .track(let track):
@@ -695,6 +868,7 @@ struct PlayerControls: View {
             (viewModel.showControls || viewModel.isScrubbing)
                 && !viewModel.showSettingsPanel
                 && !viewModel.showPauseOverlay
+                && !viewModel.showScenePanel
         )
         .focused($focusedControl, equals: .timeline)
         .focusEffectDisabledIfAvailable()
@@ -951,8 +1125,37 @@ extension View {
             background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius))
         }
     }
-
 }
+
+/// Translucent "liquid glass" fill used by interactive cards (matching DetailsScreen).
+struct TvCardGlassBackground<S: InsettableShape>: ViewModifier {
+    let isFocused: Bool
+    let shape: S
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isFocused {
+            content
+                .background(Color.white.opacity(0.28), in: shape)
+                .background(.ultraThinMaterial, in: shape)
+                .overlay(shape.stroke(Color.white, lineWidth: 2.5))
+        } else {
+            if #available(tvOS 26.0, *) {
+                content
+                    .background(Color.black.opacity(0.25), in: shape)
+                    .background(Color.white.opacity(0.08), in: shape)
+                    .glassEffect(.regular, in: shape)
+                    .overlay(shape.stroke(Color.white.opacity(0.18), lineWidth: 1))
+            } else {
+                content
+                    .background(.ultraThinMaterial, in: shape)
+                    .background(Color.black.opacity(0.30), in: shape)
+                    .overlay(shape.stroke(Color.white.opacity(0.18), lineWidth: 1))
+            }
+        }
+    }
+}
+
 // MARK: - Next episode card
 //
 // Next-episode prompt shown near the end of an episode. Liquid Glass card with
@@ -1282,6 +1485,7 @@ struct PlayerSettingsPanel: View {
         case speed(Float)
         case seekStep(Int)
         case seekPreview
+        case loadingStatus
         case debugOverlay
         case aspect(String)
         case style(StyleControl)
@@ -2135,6 +2339,14 @@ struct PlayerSettingsPanel: View {
                 columnHeader(L10n.string("player_options", fallback: "Options"))
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: 12) {
+                        toggleRow(
+                            title: L10n.string("playback_show_loading_status", fallback: "Show loading status"),
+                            isOn: viewModel.isShowLoadingStatusEnabled,
+                            focusKey: .loadingStatus
+                        ) {
+                            viewModel.setShowLoadingStatusEnabled(!viewModel.isShowLoadingStatusEnabled)
+                        }
+
                         toggleRow(
                             title: L10n.string("tvos_settings_seeking_preview", fallback: "Seeking Preview"),
                             isOn: viewModel.isSeekPreviewEnabled,

@@ -42,7 +42,24 @@ extension PlayerView {
     @ViewBuilder
     var playerStatusOverlay: some View {
         if let diagnostic = viewModel.currentErrorDiagnostic {
-            playbackErrorOverlay(diagnostic: diagnostic)
+            PlaybackErrorOverlayView(
+                diagnostic: diagnostic,
+                showSources: onRequestSources != nil || (diagnostic.isHostingIssue && (viewModel.availableSources.count > 1 || fetchPlaybackSources != nil)),
+                onSources: {
+                    if let onRequestSources {
+                        onRequestSources()
+                    } else {
+                        viewModel.openSidePanel(.sources)
+                    }
+                },
+                onRetry: {
+                    viewModel.retryCurrentPlayback()
+                },
+                onClose: {
+                    onBack()
+                }
+            )
+            .transition(.opacity)
         } else {
             switch viewModel.status {
             case .buffering, .idle:
@@ -51,7 +68,7 @@ extension PlayerView {
                         backdropUrl: meta.backgroundUrl ?? meta.posterUrl,
                         logoUrl: meta.logoUrl,
                         title: meta.name,
-                        message: L10n.string("player_status_starting_stream", fallback: "Starting stream")
+                        message: viewModel.loadingStepMessage
                     )
                     .transition(.opacity)
                 } else if !didReportPlaybackStarted {
@@ -59,7 +76,7 @@ extension PlayerView {
                         backdropUrl: meta.backgroundUrl ?? meta.posterUrl,
                         logoUrl: meta.logoUrl,
                         title: meta.name,
-                        message: L10n.string("player_status_starting_stream", fallback: "Starting stream")
+                        message: viewModel.loadingStepMessage
                     )
                     .transition(.opacity)
                 } else if !viewModel.hasRenderedFirstFrame {
@@ -75,7 +92,7 @@ extension PlayerView {
                         backdropUrl: meta.backgroundUrl ?? meta.posterUrl,
                         logoUrl: meta.logoUrl,
                         title: meta.name,
-                        message: L10n.string("player_status_starting_stream", fallback: "Starting stream")
+                        message: viewModel.loadingStepMessage
                     )
                     .transition(.opacity)
                 }
@@ -85,8 +102,23 @@ extension PlayerView {
         }
     }
 
-    @ViewBuilder
-    private func playbackErrorOverlay(diagnostic: PlaybackErrorDiagnostic) -> some View {
+struct PlaybackErrorOverlayView: View {
+    let diagnostic: PlaybackErrorDiagnostic
+    let showSources: Bool
+    let onSources: () -> Void
+    let onRetry: () -> Void
+    let onClose: () -> Void
+
+    enum FocusItem: Hashable {
+        case sources
+        case retry
+        case close
+    }
+
+    @FocusState private var focusedItem: FocusItem?
+    @State private var didInitializeFocus = false
+
+    var body: some View {
         VStack(spacing: 24) {
             // Icon
             Image(systemName: diagnostic.badgeIconName)
@@ -111,60 +143,68 @@ extension PlayerView {
 
             // Action Buttons
             HStack(spacing: 20) {
-                if diagnostic.isHostingIssue && (viewModel.availableSources.count > 1 || fetchPlaybackSources != nil) {
-                    Button {
-                        viewModel.sidePanel = .sources
-                    } label: {
+                if showSources {
+                    let isSourcesFocused = focusedItem == .sources
+                    Button(action: onSources) {
                         HStack(spacing: 8) {
                             Image(systemName: "list.bullet.rectangle.portrait")
                                 .font(.system(size: 15, weight: .bold))
                             Text(L10n.string("player_sources_title", fallback: "Other Sources"))
                                 .font(.system(size: 16, weight: .semibold))
                         }
-                        .foregroundColor(.white)
+                        .foregroundColor(isSourcesFocused ? .black : .white)
                         .padding(.horizontal, 20)
                         .padding(.vertical, 12)
-                        .background(Color.white.opacity(0.18), in: Capsule())
+                        .background(isSourcesFocused ? Color.white : Color.white.opacity(0.18), in: Capsule())
+                        .scaleEffect(isSourcesFocused ? 1.06 : 1.0)
+                        .shadow(color: .black.opacity(isSourcesFocused ? 0.35 : 0), radius: isSourcesFocused ? 10 : 0, y: 4)
+                        .animation(.easeOut(duration: 0.14), value: isSourcesFocused)
                     }
                     .buttonStyle(PosterCardButtonStyle())
-                    .focused($errorFocus, equals: .sources)
+                    .focusEffectDisabledIfAvailable()
+                    .focused($focusedItem, equals: .sources)
                 }
 
-                Button {
-                    viewModel.retryCurrentPlayback()
-                } label: {
+                let isRetryFocused = focusedItem == .retry
+                Button(action: onRetry) {
                     HStack(spacing: 8) {
                         Image(systemName: "arrow.clockwise")
                             .font(.system(size: 15, weight: .bold))
                         Text(L10n.string("common_retry", fallback: "Retry"))
                             .font(.system(size: 16, weight: .semibold))
                     }
-                    .foregroundColor(.white)
+                    .foregroundColor(isRetryFocused ? .black : .white)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 12)
-                    .background(Color.white.opacity(0.18), in: Capsule())
+                    .background(isRetryFocused ? Color.white : Color.white.opacity(0.18), in: Capsule())
+                    .scaleEffect(isRetryFocused ? 1.06 : 1.0)
+                    .shadow(color: .black.opacity(isRetryFocused ? 0.35 : 0), radius: isRetryFocused ? 10 : 0, y: 4)
+                    .animation(.easeOut(duration: 0.14), value: isRetryFocused)
                 }
                 .buttonStyle(PosterCardButtonStyle())
+                .focusEffectDisabledIfAvailable()
                 .accessibilityIdentifier("player.retryStartup")
-                .focused($errorFocus, equals: .retry)
-                .focused($startupRetryFocused)
+                .focused($focusedItem, equals: .retry)
 
-                Button {
-                    onBack()
-                } label: {
+                let isCloseFocused = focusedItem == .close
+                Button(action: onClose) {
                     HStack(spacing: 8) {
                         Image(systemName: "xmark")
                             .font(.system(size: 15, weight: .bold))
                         Text(L10n.string("common_close", fallback: "Close"))
                             .font(.system(size: 16, weight: .semibold))
                     }
-                    .foregroundColor(.white)
+                    .foregroundColor(isCloseFocused ? .black : .white)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 12)
-                    .background(Color.white.opacity(0.18), in: Capsule())
+                    .background(isCloseFocused ? Color.white : Color.white.opacity(0.18), in: Capsule())
+                    .scaleEffect(isCloseFocused ? 1.06 : 1.0)
+                    .shadow(color: .black.opacity(isCloseFocused ? 0.35 : 0), radius: isCloseFocused ? 10 : 0, y: 4)
+                    .animation(.easeOut(duration: 0.14), value: isCloseFocused)
                 }
                 .buttonStyle(PosterCardButtonStyle())
-                .focused($errorFocus, equals: .close)
+                .focusEffectDisabledIfAvailable()
+                .focused($focusedItem, equals: .close)
             }
             .padding(.top, 6)
         }
@@ -172,10 +212,14 @@ extension PlayerView {
         .padding(.vertical, 38)
         .glassRoundedRect(cornerRadius: 28)
         .shadow(color: .black.opacity(0.7), radius: 24, y: 8)
+        .focusSection()
         .onAppear {
-            remoteInputFocused = false
-            errorFocus = .retry
-            startupRetryFocused = true
+            if !didInitializeFocus {
+                didInitializeFocus = true
+                DispatchQueue.main.async {
+                    focusedItem = .retry
+                }
+            }
         }
     }
 
@@ -187,24 +231,7 @@ extension PlayerView {
         case .playerEngine: return Color(red: 1.0, green: 0.85, blue: 0.3)
         }
     }
-
-    private func badgeBackgroundColor(for origin: PlaybackErrorOrigin) -> Color {
-        switch origin {
-        case .hostingProvider: return Color(red: 1.0, green: 0.60, blue: 0.1).opacity(0.20)
-        case .network: return Color(red: 0.9, green: 0.2, blue: 0.2).opacity(0.20)
-        case .compatibility: return Color(red: 0.6, green: 0.4, blue: 0.9).opacity(0.20)
-        case .playerEngine: return Color(red: 0.9, green: 0.7, blue: 0.1).opacity(0.20)
-        }
-    }
-
-    private func badgeBorderColor(for origin: PlaybackErrorOrigin) -> Color {
-        switch origin {
-        case .hostingProvider: return Color(red: 1.0, green: 0.60, blue: 0.1).opacity(0.45)
-        case .network: return Color(red: 0.9, green: 0.2, blue: 0.2).opacity(0.45)
-        case .compatibility: return Color(red: 0.6, green: 0.4, blue: 0.9).opacity(0.45)
-        case .playerEngine: return Color(red: 0.9, green: 0.7, blue: 0.1).opacity(0.45)
-        }
-    }
+}
 
     @ViewBuilder
     var debugOverlayLayer: some View {

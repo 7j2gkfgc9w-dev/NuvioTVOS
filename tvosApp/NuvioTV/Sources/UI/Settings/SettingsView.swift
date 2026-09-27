@@ -286,7 +286,10 @@ enum SettingsKey {
     static let playerShowEpisodes = "nuvio.tv.settings.playback.showEpisodes"
     static let playerShowSources = "nuvio.tv.settings.playback.showSources"
     static let playerShowSubtitles = "nuvio.tv.settings.playback.showSubtitles"
+    static let playerShowAudio = "nuvio.tv.settings.playback.showAudio"
     static let seekPreviewEnabled = "nuvio.tv.settings.playback.seekPreviewEnabled"
+    static let showLoadingStatus = "nuvio.tv.settings.playback.showLoadingStatus"
+    static let sceneFeatureEnabled = "nuvio.tv.settings.playback.sceneFeatureEnabled"
 
     static let fastNavigation = "nuvio.tv.settings.advanced.fastNavigation"
     static let smoothFocus = "nuvio.tv.settings.advanced.smoothFocus"
@@ -343,7 +346,8 @@ enum SettingsKey {
         subtitleLanguages, subtitleLanguage, subtitleLanguageSecondary, subtitleLanguageTertiary,
         forcedSubtitles, subtitleSize, frameRateMatching, networkCache, hybridDiskCacheEnabled, hybridDiskCacheLimitGB, playbackTrackSelections,
         externalPlayerForwardSubtitles, assOverrideMode,
-        playerShowPiP, playerShowEpisodes, playerShowSources, playerShowSubtitles, seekPreviewEnabled,
+        playerShowPiP, playerShowEpisodes, playerShowSources, playerShowSubtitles, playerShowAudio, seekPreviewEnabled, showLoadingStatus,
+        sceneFeatureEnabled,
         fastNavigation, smoothFocus, playbackDiagnostics, playbackDebug, focusHighlighter,
         iCloudSyncEnabled, iCloudLastSyncDate
     ] + SubtitleStyleKey.all
@@ -614,6 +618,28 @@ enum SubtitleLanguagePreferences {
 
     static func aliases(for language: String) -> [String] {
         [normalized(language)] + (languageAliases[language] ?? [])
+    }
+
+    static func humanLanguageName(from codeOrName: String) -> String {
+        let trimmed = codeOrName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+
+        if let match = supportedLanguages.first(where: { matches(trimmed, target: $0) }) {
+            return match
+        }
+
+        let lower = trimmed.lowercased()
+        if let locName = Locale.current.localizedString(forLanguageCode: lower) ??
+                         Locale.current.localizedString(forIdentifier: lower) {
+            return locName.prefix(1).uppercased() + locName.dropFirst()
+        }
+
+        if let enName = Locale(identifier: "en").localizedString(forLanguageCode: lower) ??
+                        Locale(identifier: "en").localizedString(forIdentifier: lower) {
+            return enName.prefix(1).uppercased() + enName.dropFirst()
+        }
+
+        return trimmed.prefix(1).uppercased() + trimmed.dropFirst()
     }
 
     static func mpvLanguageList(for languages: [String]) -> String? {
@@ -6597,6 +6623,7 @@ private struct PlaybackSettingsView: View {
     @AppStorage(SettingsKey.streamAutoPlayPreferBingeGroup) private var streamAutoPlayPreferBingeGroup = true
     @AppStorage(SettingsKey.streamAutoPlayReuseBingeGroup) private var streamAutoPlayReuseBingeGroup = true
     @AppStorage(SettingsKey.seekPreviewEnabled) private var seekPreviewEnabled = true
+    @AppStorage(SettingsKey.showLoadingStatus) private var showLoadingStatus = true
     @AppStorage(SettingsKey.postPlayRecommendationsEnabled) private var postPlayRecommendationsEnabled = true
     @AppStorage(SettingsKey.trailersEnabled) private var trailersEnabled = true
     @AppStorage(SettingsKey.trailerPreviewSound) private var trailerPreviewSound = false
@@ -6609,13 +6636,15 @@ private struct PlaybackSettingsView: View {
     @AppStorage(SettingsKey.forcedSubtitles) private var forcedSubtitles = true
     @AppStorage(SettingsKey.frameRateMatching) private var frameRateMatching = "Always"
     @AppStorage(SettingsKey.networkCache) private var networkCache = "Auto"
-    @AppStorage(SettingsKey.hybridDiskCacheEnabled) private var hybridDiskCacheEnabled = true
+    @AppStorage(SettingsKey.hybridDiskCacheEnabled) private var hybridDiskCacheEnabled = false
     @AppStorage(SettingsKey.hybridDiskCacheLimitGB) private var hybridDiskCacheLimitGB = 20
     @AppStorage(SettingsKey.assOverrideMode) private var assOverrideMode = "Off"
     @AppStorage(SettingsKey.playerShowPiP) private var playerShowPiP = true
     @AppStorage(SettingsKey.playerShowEpisodes) private var playerShowEpisodes = true
     @AppStorage(SettingsKey.playerShowSources) private var playerShowSources = true
     @AppStorage(SettingsKey.playerShowSubtitles) private var playerShowSubtitles = true
+    @AppStorage(SettingsKey.playerShowAudio) private var playerShowAudio = true
+    @AppStorage(SettingsKey.sceneFeatureEnabled) private var sceneFeatureEnabled = true
 
     @State private var streamBadgeURL = ""
     @State private var streamBadgeImportError: String?
@@ -6713,6 +6742,16 @@ private struct PlaybackSettingsView: View {
                     accentColor: accentColor
                 )
 
+                SettingsToggleRow(
+                    title: L10n.string("playback_show_loading_status", fallback: "Show loading status"),
+                    subtitle: L10n.string(
+                        "playback_show_loading_status_sub",
+                        fallback: "Display step-by-step progress while the player is initializing."
+                    ),
+                    isOn: $showLoadingStatus,
+                    accentColor: accentColor
+                )
+
                 SettingsOptionRow(
                     title: L10n.string("tvos_settings_frame_rate_matching", fallback: "Frame Rate Matching"),
                     subtitle: L10n.string("tvos_settings_match_display_refresh_to_video_apple_tv__eb667d81", fallback: "Match display refresh to video; Apple TV Match Content must also be enabled"),
@@ -6731,31 +6770,6 @@ private struct PlaybackSettingsView: View {
                     options: cacheModes,
                     accentColor: accentColor
                 )
-
-                SettingsToggleRow(
-                    title: L10n.string("tvos_settings_hybrid_disk_cache", fallback: "Hybrid Disk Cache"),
-                    subtitle: L10n.string(
-                        "tvos_settings_hybrid_disk_cache_subtitle",
-                        fallback: "3-tier cache to Apple TV SSD (Demand, 10-min forward fill, whole-file background archive) with instant seek and rewind."
-                    ),
-                    isOn: $hybridDiskCacheEnabled,
-                    accentColor: accentColor
-                )
-
-                if hybridDiskCacheEnabled {
-                    SettingsStepperRow(
-                        title: L10n.string("tvos_settings_hybrid_disk_cache_limit", fallback: "Disk Cache Limit"),
-                        subtitle: L10n.string(
-                            "tvos_settings_hybrid_disk_cache_limit_subtitle",
-                            fallback: "Maximum SSD storage for video prefetching and background title caching."
-                        ),
-                        value: $hybridDiskCacheLimitGB,
-                        range: 5...60,
-                        step: 5,
-                        suffix: " GB",
-                        accentColor: accentColor
-                    )
-                }
             }
 
             SettingsGroup(
@@ -6802,6 +6816,26 @@ private struct PlaybackSettingsView: View {
                         fallback: "Show the native subtitle selector button in player controls"
                     ),
                     isOn: $playerShowSubtitles,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_player_audio", fallback: "Audio & Sound Button"),
+                    subtitle: L10n.string(
+                        "tvos_settings_player_audio_subtitle",
+                        fallback: "Show the native audio and sound adjustments button in player controls"
+                    ),
+                    isOn: $playerShowAudio,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_player_scene", fallback: "Scene (InSight)"),
+                    subtitle: L10n.string(
+                        "tvos_settings_player_scene_subtitle",
+                        fallback: "Press Down during playback to recognize cast members and songs currently playing"
+                    ),
+                    isOn: $sceneFeatureEnabled,
                     accentColor: accentColor
                 )
 

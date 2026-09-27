@@ -32,6 +32,7 @@ struct PlayerView: View {
     var provider: String? = nil
     var filename: String? = nil
     var videoSize: Int64? = nil
+    var videoHash: String? = nil
     var cacheFileIdentity: PlaybackCacheFileIdentity? = nil
     var trickplayURL: URL? = nil
     /// Episode context for the in-player Next Episode card. Empty for movies/trailers.
@@ -55,6 +56,7 @@ struct PlayerView: View {
         _ contentId: String,
         _ subtitleLine: String
     ) async -> PreparedNextStream?)? = nil
+    var onRequestSources: (() -> Void)? = nil
     var onFinished: (() -> Void)? = nil
     var onPlaybackStarted: (() -> Void)? = nil
     var onPlayRecommendation: ((_ meta: NuvioMeta, _ playManually: Bool) -> Void)? = nil
@@ -62,18 +64,10 @@ struct PlayerView: View {
     var onBack: () -> Void
 
     @State var didHandleFinished = false
-    enum PlaybackErrorFocusItem: Hashable {
-        case sources
-        case retry
-        case close
-    }
-
     @State var didReportPlaybackStarted = false
     @State var lastBecameActiveAt: Date = Date()
     @State var requestedControlFocus: PlayerControlFocus? = nil
     @FocusState var remoteInputFocused: Bool
-    @FocusState var startupRetryFocused: Bool
-    @FocusState var errorFocus: PlaybackErrorFocusItem?
     @FocusState var nextEpisodeFocused: Bool
     @FocusState var cancelAutoPlayFocused: Bool
     @FocusState var skipSegmentFocused: Bool

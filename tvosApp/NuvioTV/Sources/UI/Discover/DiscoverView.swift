@@ -79,11 +79,6 @@ struct DiscoverSection: View {
                 restoreArmTask?.cancel()
                 lastFocusedCardID = newValue
                 shouldRestoreFocus = false
-                // Restoration complete -- lift the focus restriction.
-                if isEnabled, newValue == overlayRestoreCardID {
-                    overlayRestoreCardID = nil
-                    parentTransitionActive = false
-                }
             } else if lastFocusedCardID != nil {
                 scheduleRestoreArm()
             }
@@ -324,6 +319,13 @@ struct DiscoverSection: View {
         if isFocused {
             focusChangeGeneration &+= 1
             focusedElementID = id
+            if id.hasPrefix("card:") {
+                let cardID = String(id.dropFirst(5))
+                if overlayRestoreCardID == cardID {
+                    overlayRestoreCardID = nil
+                    parentTransitionActive = false
+                }
+            }
         } else if focusedElementID == id {
             let generation = focusChangeGeneration
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {

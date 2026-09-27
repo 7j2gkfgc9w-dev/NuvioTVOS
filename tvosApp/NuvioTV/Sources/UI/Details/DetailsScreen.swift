@@ -16,7 +16,20 @@ struct DetailsScreen: View {
     /// (streamURL, httpHeaders, meta, episodeSubtitleLine, streamSubtitles, currentEpisode, orderedEpisodes).
     /// The last two carry series context for the player's next-episode auto-play;
     /// both are empty/nil for movies and trailers.
-    let onPlayClick: (String, [String: String], NuvioMeta, String, [NuvioSubtitle], NuvioVideo?, [NuvioVideo], ExternalPlayer?, PlaybackCacheFileIdentity?) -> Void
+    let onPlayClick: (
+        _ streamUrl: String,
+        _ httpHeaders: [String: String],
+        _ meta: NuvioMeta,
+        _ subtitle: String,
+        _ externalSubtitles: [NuvioSubtitle],
+        _ currentEpisode: NuvioVideo?,
+        _ episodes: [NuvioVideo],
+        _ player: ExternalPlayer?,
+        _ cacheFileIdentity: PlaybackCacheFileIdentity?,
+        _ filename: String?,
+        _ videoSize: Int64?,
+        _ videoHash: String?
+    ) -> Void
     let onBack: () -> Void
     /// Open another title (More Like This / production catalog).
     var onOpenTitle: ((String, String) -> Void)? = nil
@@ -61,6 +74,16 @@ struct DetailsScreen: View {
     /// so the picker can keep its spinner up instead of appearing to hang.
     @State private var isResolvingDebrid = false
 
+    private var detailsLoadingMessage: String {
+        if isSmartPlaybackPending {
+            return L10n.string("player_searching_sources", fallback: "Searching sources…")
+        } else if isResolvingDebrid {
+            return L10n.string("player_loading_preparing", fallback: "Preparing stream…")
+        } else {
+            return L10n.string("player_loading_building", fallback: "Building player…")
+        }
+    }
+
     init(
         id: String,
         type: String,
@@ -68,7 +91,20 @@ struct DetailsScreen: View {
         initiallyPresentStreamPicker: Bool = false,
         initialStreamPickerEpisode: NuvioVideo? = nil,
         onInitialStreamPickerPresented: (() -> Void)? = nil,
-        onPlayClick: @escaping (String, [String: String], NuvioMeta, String, [NuvioSubtitle], NuvioVideo?, [NuvioVideo], ExternalPlayer?, PlaybackCacheFileIdentity?) -> Void,
+        onPlayClick: @escaping (
+            _ streamUrl: String,
+            _ httpHeaders: [String: String],
+            _ meta: NuvioMeta,
+            _ subtitle: String,
+            _ externalSubtitles: [NuvioSubtitle],
+            _ currentEpisode: NuvioVideo?,
+            _ episodes: [NuvioVideo],
+            _ player: ExternalPlayer?,
+            _ cacheFileIdentity: PlaybackCacheFileIdentity?,
+            _ filename: String?,
+            _ videoSize: Int64?,
+            _ videoHash: String?
+        ) -> Void,
         onBack: @escaping () -> Void,
         onOpenTitle: ((String, String) -> Void)? = nil,
         onOpenProduction: ((MetaCompany) -> Void)? = nil,
@@ -168,7 +204,7 @@ struct DetailsScreen: View {
                     onPlayClick: {
                         if let url = viewModel.uiState.streams.first?.url,
                            let meta = viewModel.uiState.meta {
-                            onPlayClick(url, [:], meta, "", [], nil, [], nil, nil)
+                            onPlayClick(url, [:], meta, "", [], nil, [], nil, nil, nil, nil, nil)
                         }
                     },
                     onWatchlistClick: { viewModel.toggleWatchlist() },
@@ -195,7 +231,7 @@ struct DetailsScreen: View {
                     backdropUrl: meta.backgroundUrl ?? meta.posterUrl,
                     logoUrl: meta.logoUrl,
                     title: meta.name,
-                    message: L10n.string("player_status_starting_stream", fallback: "Starting stream")
+                    message: detailsLoadingMessage
                 )
                 .transition(.opacity)
                 .zIndex(25)
@@ -505,7 +541,20 @@ struct DetailsScreen: View {
             isPreparingPlayback = true
             isSmartPlaybackPending = false
             armExternalPlayerTimeoutIfNeeded(player: player)
-            onPlayClick(url, stream.httpHeaders ?? [:], meta, pendingEpisodeSubtitle, stream.subtitles, pendingEpisode, orderedEpisodes(for: meta), player, PlaybackCacheFileIdentity(infoHash: stream.effectiveInfoHash, fileIndex: stream.effectiveFileIdx))
+            onPlayClick(
+                url,
+                stream.httpHeaders ?? [:],
+                meta,
+                pendingEpisodeSubtitle,
+                stream.subtitles,
+                pendingEpisode,
+                orderedEpisodes(for: meta),
+                player,
+                PlaybackCacheFileIdentity(infoHash: stream.effectiveInfoHash, fileIndex: stream.effectiveFileIdx),
+                stream.filename,
+                stream.videoSize,
+                stream.videoHash
+            )
             return
         }
 
@@ -521,12 +570,16 @@ struct DetailsScreen: View {
         Task {
             let debridResolver = DebridResolver(store: ProfileSettings.current)
             var resolvedURL: URL? = nil
+            var debridFilename: String? = nil
+            var debridVideoSize: Int64? = nil
             var rateLimited = false
             if debridResolver.isEnabled {
                 let result = await debridResolver
                     .resolvedURL(for: stream, season: season, episode: episode)
-                if case let .success(url, _, _)? = result {
+                if case let .success(url, filename, videoSize)? = result {
                     resolvedURL = url
+                    debridFilename = filename
+                    debridVideoSize = videoSize
                 } else if case .rateLimited? = result {
                     rateLimited = true
                 }
@@ -553,7 +606,20 @@ struct DetailsScreen: View {
                     isPreparingPlayback = true
                     isSmartPlaybackPending = false
                     armExternalPlayerTimeoutIfNeeded(player: player)
-                    onPlayClick(url.absoluteString, stream.httpHeaders ?? [:], meta, pendingEpisodeSubtitle, stream.subtitles, pendingEpisode, orderedEpisodes(for: meta), player, nil)
+                    onPlayClick(
+                        url.absoluteString,
+                        stream.httpHeaders ?? [:],
+                        meta,
+                        pendingEpisodeSubtitle,
+                        stream.subtitles,
+                        pendingEpisode,
+                        orderedEpisodes(for: meta),
+                        player,
+                        nil,
+                        debridFilename ?? stream.filename,
+                        debridVideoSize ?? stream.videoSize,
+                        stream.videoHash
+                    )
                 } else {
                     PlaybackStartupBenchmark.shared.cancel()
                     isPreparingPlayback = false
@@ -630,12 +696,12 @@ struct DetailsScreen: View {
         Task {
             if let source = await YouTubeTrailerResolver.shared.resolve(for: meta) {
                 await MainActor.run {
-                    onPlayClick(source.videoUrl, source.requestHeaders, meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil)
+                    onPlayClick(source.videoUrl, source.requestHeaders, meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil, nil, nil, nil)
                 }
             } else if let ytId = await preferredTrailerYouTubeId(for: meta) {
                 let youtubeUrl = "https://www.youtube.com/watch?v=\(ytId)"
                 await MainActor.run {
-                    onPlayClick(youtubeUrl, [:], meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil)
+                    onPlayClick(youtubeUrl, [:], meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil, nil, nil, nil)
                 }
             }
         }

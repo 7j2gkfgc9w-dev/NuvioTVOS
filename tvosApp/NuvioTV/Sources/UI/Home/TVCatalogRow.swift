@@ -692,6 +692,7 @@ struct TVHomeCatalogGridSection: View {
     let initialFocusCardKey: String?
     var externalFocus: FocusState<String?>.Binding? = nil
     var restrictFocusToCardKey: String? = nil
+    var retainFocusAppearanceForCardKey: String? = nil
     var suppressFocusAnimations = false
     var showAddonName: Bool = true
     let onInitialFocusRequested: () -> Void
@@ -746,7 +747,7 @@ struct TVHomeCatalogGridSection: View {
                         height: TVHomeGridLayout.posterHeight,
                         externalFocus: externalFocus,
                         focusValue: cardKey,
-                        retainFocusAppearance: restrictFocusToCardKey == cardKey,
+                        retainFocusAppearance: (retainFocusAppearanceForCardKey ?? restrictFocusToCardKey) == cardKey,
                         isWatched: TVHomeGridLayout.isWatched(item, watchedTitleKeys: watchedTitleKeys),
                         shouldRequestInitialFocus: shouldRequestInitialFocus,
                         onInitialFocusRequested: shouldRequestInitialFocus ? onInitialFocusRequested : nil,
@@ -762,7 +763,7 @@ struct TVHomeCatalogGridSection: View {
                     title: section.title,
                     externalFocus: externalFocus,
                     externalFocusValue: seeAllKey,
-                    retainFocusAppearance: restrictFocusToCardKey == seeAllKey,
+                    retainFocusAppearance: (retainFocusAppearanceForCardKey ?? restrictFocusToCardKey) == seeAllKey,
                     shouldRequestInitialFocus: seeAllKey == initialFocusCardKey,
                     onInitialFocusRequested: seeAllKey == initialFocusCardKey
                         ? onInitialFocusRequested
