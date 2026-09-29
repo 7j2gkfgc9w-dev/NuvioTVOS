@@ -23,10 +23,10 @@ struct ScenePanelView: View {
             Spacer()
             
             // Bottom third panel
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 14) {
                 // Tab Header Bar
                 tabHeaderBar
-                    .padding(.top, 14)
+                    .padding(.top, 10)
                 
                 // Active Tab Content
                 Group {
@@ -39,8 +39,8 @@ struct ScenePanelView: View {
                         upNextTabContent
                     }
                 }
-                .frame(height: 220)
-                .padding(.bottom, 54)
+                .frame(height: 248)
+                .padding(.bottom, 40)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -116,6 +116,7 @@ struct ScenePanelView: View {
                 songCardSection
             }
             .padding(.horizontal, 60)
+            .padding(.vertical, 16)
         }
     }
     
@@ -129,7 +130,30 @@ struct ScenePanelView: View {
                     actor: actor,
                     isLiveRecognized: true
                 ) {
-                    viewModel.openDetail(.actor(actor, biography: nil, knownFor: []))
+                    viewModel.openDetail(.actor(actor, detail: nil))
+                }
+                .focused($focusedCardID, equals: "actor-\(actor.id)")
+                .onMoveCommand { direction in
+                    if direction == .up {
+                        focusedTab = viewModel.selectedTab
+                    }
+                }
+            }
+        } else if !viewModel.castCandidates.isEmpty {
+            ForEach(viewModel.castCandidates.prefix(12)) { candidate in
+                let actor = SceneRecognizedActor(
+                    id: candidate.id,
+                    name: candidate.name,
+                    character: candidate.character,
+                    profileURL: candidate.profileURL,
+                    confidence: 1.0,
+                    tmdbId: candidate.tmdbId ?? Int(candidate.id)
+                )
+                SceneActorCard(
+                    actor: actor,
+                    isLiveRecognized: false
+                ) {
+                    viewModel.openDetail(.actor(actor, detail: nil))
                 }
                 .focused($focusedCardID, equals: "actor-\(actor.id)")
                 .onMoveCommand { direction in
