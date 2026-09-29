@@ -11,12 +11,14 @@ final class SceneCoordinator: ObservableObject {
     
     private let frameProvider: any SceneFrameProviding
     private let castProvider: any SceneCastProviding
+    private let soundtrackProvider: any SceneSoundtrackProviding
     private let actorRecognition: ActorRecognitionService
     private let musicRecognition: MusicRecognitionService
     private let audioTapBroker: PlaybackAudioTapBroker?
     private let resultCache: SceneResultCache
     private let subtitleScraper: SceneSubtitleTimelineScraper
     
+    private var underlyingMusicStatus: SceneMusicStatus = .disabled
     private var context: SceneContext?
     private var availableSubtitles: [NuvioSubtitle] = []
     private var samplingTask: Task<Void, Never>?
@@ -24,6 +26,7 @@ final class SceneCoordinator: ObservableObject {
     private var activeAnalysisID: UUID?
     private var isAnalyzingFrame: Bool { activeAnalysisID != nil }
     private var isFetchingCast: Bool = false
+    private var isFetchingSoundtrack: Bool = false
     private var pendingPausedFrameGeneration: UInt64?
     private var needsFrameAnalysisAfterCastLoad: Bool = false
     private var lastAnalyzedFrameSourceTime: Double?
@@ -35,6 +38,7 @@ final class SceneCoordinator: ObservableObject {
     init(
         frameProvider: any SceneFrameProviding,
         castProvider: any SceneCastProviding = TmdbSceneCastProvider(),
+        soundtrackProvider: any SceneSoundtrackProviding = CommunitySceneSoundtrackProvider(),
         actorRecognition: ActorRecognitionService = ActorRecognitionService(),
         musicRecognition: MusicRecognitionService = MusicRecognitionService(),
         audioTapBroker: PlaybackAudioTapBroker? = nil,
@@ -43,6 +47,7 @@ final class SceneCoordinator: ObservableObject {
     ) {
         self.frameProvider = frameProvider
         self.castProvider = castProvider
+        self.soundtrackProvider = soundtrackProvider
         self.actorRecognition = actorRecognition
         self.musicRecognition = musicRecognition
         self.audioTapBroker = audioTapBroker
@@ -57,6 +62,7 @@ final class SceneCoordinator: ObservableObject {
             await self?.musicRecognition.setStatusCallback { [weak self] status in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
+                    self.underlyingMusicStatus = status
                     self.updateMusicStatus(status)
                 }
             }
@@ -88,11 +94,12 @@ final class SceneCoordinator: ObservableObject {
         self.context = context
     }
     
-    /// Proactively warms TMDB cast candidates and face embeddings in the background
+    /// Proactively warms TMDB cast candidates, soundtrack metadata, and face embeddings in the background
     /// so that the first frame matches with zero latency when InSight is opened.
     func prewarm(context: SceneContext) {
         updateContext(context)
         fetchCastIfNeeded()
+        fetchSoundtrackIfNeeded()
     }
 
     func updateAvailableSubtitles(_ subtitles: [NuvioSubtitle]) {
@@ -112,6 +119,10 @@ final class SceneCoordinator: ObservableObject {
                 context: context,
                 resultCache: self.resultCache
             )
+            await MainActor.run {
+                guard self.isPanelOpen, self.isSameMediaContext(self.context, context) else { return }
+                self.evaluateActiveSong(at: self.sourceTimeProvider())
+            }
         }
     }
     
@@ -127,13 +138,17 @@ final class SceneCoordinator: ObservableObject {
         let isPlaying = isPlayingProvider()
         let currentTime = sourceTimeProvider()
         
-        // 1. Warm / Fetch cast references
+        // 1. Warm / Fetch cast references & soundtrack metadata
         fetchCastIfNeeded()
+        fetchSoundtrackIfNeeded()
         
-        // 2. Start music recognition in parallel
+        // 2. Evaluate currently active song at this timestamp
+        evaluateActiveSong(at: currentTime)
+        
+        // 3. Start music recognition in parallel
         startMusicRecognition(isPlaying: isPlaying, sourceTime: currentTime)
         
-        // 3. Start frame sampling loop (every 1.5 seconds)
+        // 4. Start frame sampling loop (every 1.5 seconds)
         startFrameSampling(generation: gen)
     }
     
@@ -157,14 +172,16 @@ final class SceneCoordinator: ObservableObject {
         pendingPausedFrameGeneration = nil
         needsFrameAnalysisAfterCastLoad = false
         lastAnalyzedFrameSourceTime = nil
+        let currentTime = sourceTimeProvider()
         currentSnapshot = SceneSnapshot(
-            timestamp: sourceTimeProvider(),
+            timestamp: currentTime,
             actors: [],
             song: nil,
             actorStatus: .analyzing,
             musicStatus: isPlayingProvider() ? .listening : .requiresPlayback,
             generation: currentGeneration
         )
+        evaluateActiveSong(at: currentTime)
         Task { [weak self] in
             guard let self else { return }
             await self.actorRecognition.resetTemporalTracking()
@@ -179,6 +196,7 @@ final class SceneCoordinator: ObservableObject {
             await musicRecognition.reportPlaybackPaused()
         }
         guard isPanelOpen else { return }
+        evaluateActiveSong(at: sourceTimeProvider())
         captureAndAnalyzeCurrentFrame(forGeneration: currentGeneration)
     }
 
@@ -208,6 +226,7 @@ final class SceneCoordinator: ObservableObject {
         pendingPausedFrameGeneration = nil
         let isPlaying = isPlayingProvider()
         let currentTime = sourceTimeProvider()
+        evaluateActiveSong(at: currentTime)
         startMusicRecognition(isPlaying: isPlaying, sourceTime: currentTime)
         if isPanelOpen, samplingTask == nil {
             startFrameSampling(generation: currentGeneration)
@@ -220,11 +239,13 @@ final class SceneCoordinator: ObservableObject {
         pendingPausedFrameGeneration = nil
         needsFrameAnalysisAfterCastLoad = false
         isFetchingCast = false
+        isFetchingSoundtrack = false
         stopSampling()
         stopMusicRecognition()
         castCandidates.removeAll()
         availableSubtitles.removeAll()
         lastAnalyzedFrameSourceTime = nil
+        underlyingMusicStatus = .disabled
         currentSnapshot = .empty
         let cancellationCutoff = Date()
         Task {
@@ -276,6 +297,88 @@ final class SceneCoordinator: ObservableObject {
         }
     }
     
+    private func fetchSoundtrackIfNeeded() {
+        guard let context, !isFetchingSoundtrack else { return }
+        isFetchingSoundtrack = true
+        print("[Scene] fetchSoundtrackIfNeeded() started for \"\(context.title)\" (canonicalId: \(context.canonicalId))")
+        
+        Task { [weak self, context] in
+            let intervals: [SceneTimelineInterval]
+            do {
+                intervals = try await self?.soundtrackProvider.fetchSoundtrack(context: context) ?? []
+            } catch {
+                print("[Scene] ⚠️ fetchSoundtrack failed or threw an error for \"\(context.title)\": \(error.localizedDescription)")
+                intervals = []
+            }
+            guard let self else { return }
+            if !intervals.isEmpty {
+                await self.resultCache.storeTimelineIntervals(intervals)
+                print("[Scene] Stored \(intervals.count) soundtrack intervals for \"\(context.title)\"")
+            }
+            await MainActor.run {
+                self.isFetchingSoundtrack = false
+                guard self.isPanelOpen, self.isSameMediaContext(self.context, context) else { return }
+                self.evaluateActiveSong(at: self.sourceTimeProvider())
+            }
+        }
+    }
+
+    /// Checks if a song interval matches the current playback timestamp.
+    /// Songs will automatically appear when their playback window starts and disappear when it finishes.
+    func evaluateActiveSong(at sourceTime: Double) {
+        guard let context, isPanelOpen else { return }
+        let gen = currentGeneration
+        Task { [weak self, context, sourceTime, gen] in
+            guard let self else { return }
+            var activeSong = await self.resultCache.findTimelineSong(for: context, sourceTime: sourceTime)
+            if let song = activeSong, song.artworkURL == nil {
+                activeSong = await SceneSongMetadataEnricher.shared.enrich(song: song)
+                if let enriched = activeSong {
+                    await self.resultCache.storeTimelineInterval(SceneTimelineInterval(
+                        id: "enriched-\(enriched.id)",
+                        canonicalId: context.canonicalId,
+                        season: context.season,
+                        episode: context.episode,
+                        startTime: enriched.startTime ?? sourceTime,
+                        endTime: enriched.endTime ?? (sourceTime + 60.0),
+                        actors: [],
+                        song: enriched,
+                        sceneDescription: enriched.sceneDescription
+                    ))
+                }
+            }
+            await MainActor.run {
+                guard self.isPanelOpen, self.currentGeneration == gen else { return }
+                if let activeSong {
+                    if self.currentSnapshot.song?.id != activeSong.id || (self.currentSnapshot.song?.artworkURL == nil && activeSong.artworkURL != nil) {
+                        print("[Scene] 🎵 Song active at \(String(format: "%.1f", sourceTime))s: \"\(activeSong.title)\" by \(activeSong.artist) (art: \(activeSong.artworkURL != nil))")
+                        self.updateMusicStatus(.matched(activeSong))
+                    }
+                } else {
+                    // If a song is currently shown but its time window has ended, make it disappear!
+                    if let currentSong = self.currentSnapshot.song {
+                        if !currentSong.isActive(at: sourceTime) {
+                            print("[Scene] ⏹️ Song finished at \(String(format: "%.1f", sourceTime))s: \"\(currentSong.title)\"")
+                            let isPlaying = self.isPlayingProvider()
+                            let fallbackStatus: SceneMusicStatus
+                            switch self.underlyingMusicStatus {
+                            case .unavailable, .failed:
+                                fallbackStatus = self.underlyingMusicStatus
+                            default:
+                                fallbackStatus = isPlaying ? .listening : .requiresPlayback
+                            }
+                            self.updateMusicStatus(fallbackStatus)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    func fetchPersonDetail(personId: Int) async -> ScenePersonDetail? {
+        await castProvider.fetchPersonDetail(personId: personId)
+    }
+    
     func fetchPersonBiography(personId: Int) async -> String? {
         await castProvider.fetchPersonBiography(personId: personId)
     }
@@ -285,7 +388,8 @@ final class SceneCoordinator: ObservableObject {
     private func startFrameSampling(generation: UInt64) {
         samplingTask?.cancel()
         
-        // Initial immediate sample
+        // Initial immediate sample & song check
+        evaluateActiveSong(at: sourceTimeProvider())
         if isAnalyzingFrame, !isPlayingProvider() {
             pendingPausedFrameGeneration = generation
         } else {
@@ -299,6 +403,7 @@ final class SceneCoordinator: ObservableObject {
                 
                 await MainActor.run {
                     guard let self, self.isPanelOpen, self.currentGeneration == generation else { return }
+                    self.evaluateActiveSong(at: self.sourceTimeProvider())
                     if self.isPlayingProvider() {
                         self.captureAndAnalyzeCurrentFrame()
                     }
@@ -504,10 +609,22 @@ final class SceneCoordinator: ObservableObject {
     }
     
     private func updateMusicStatus(_ status: SceneMusicStatus) {
+        let resolvedSong: SceneRecognizedSong?
+        switch status {
+        case .matched(let song):
+            resolvedSong = song
+        case .listening, .noMatch, .requiresPlayback, .disabled, .unavailable, .failed:
+            if let existingSong = currentSnapshot.song, existingSong.isActive(at: sourceTimeProvider()) {
+                resolvedSong = existingSong
+            } else {
+                resolvedSong = status.matchedSong
+            }
+        }
+        
         currentSnapshot = SceneSnapshot(
             timestamp: sourceTimeProvider(),
             actors: currentSnapshot.actors,
-            song: status.matchedSong ?? currentSnapshot.song,
+            song: resolvedSong,
             actorStatus: currentSnapshot.actorStatus,
             musicStatus: status,
             generation: currentGeneration
