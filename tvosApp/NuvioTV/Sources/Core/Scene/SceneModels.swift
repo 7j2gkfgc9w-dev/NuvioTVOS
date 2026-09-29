@@ -40,6 +40,7 @@ struct SceneContext: Equatable, Sendable {
     let selectedAudioTrackId: Int?
     let isLiveStream: Bool
     let backend: PlayerBackendKind
+    let isAnime: Bool
 
     init(
         canonicalId: String,
@@ -54,7 +55,8 @@ struct SceneContext: Equatable, Sendable {
         timelineGeneration: UInt64 = 0,
         selectedAudioTrackId: Int? = nil,
         isLiveStream: Bool = false,
-        backend: PlayerBackendKind = .aether
+        backend: PlayerBackendKind = .aether,
+        isAnime: Bool = false
     ) {
         self.canonicalId = canonicalId
         self.mediaType = mediaType
@@ -69,6 +71,7 @@ struct SceneContext: Equatable, Sendable {
         self.selectedAudioTrackId = selectedAudioTrackId
         self.isLiveStream = isLiveStream
         self.backend = backend
+        self.isAnime = isAnime
     }
 }
 
@@ -289,6 +292,7 @@ struct ScenePersonMediaCredit: Identifiable, Codable, Equatable, Hashable, Senda
     let title: String
     let mediaType: String // "movie" or "tv"
     let posterURL: URL?
+    let backdropURL: URL?
     let character: String?
     let releaseYear: String?
     let voteAverage: Double?
@@ -299,6 +303,7 @@ struct ScenePersonMediaCredit: Identifiable, Codable, Equatable, Hashable, Senda
         title: String,
         mediaType: String,
         posterURL: URL? = nil,
+        backdropURL: URL? = nil,
         character: String? = nil,
         releaseYear: String? = nil,
         voteAverage: Double? = nil
@@ -308,6 +313,7 @@ struct ScenePersonMediaCredit: Identifiable, Codable, Equatable, Hashable, Senda
         self.title = title
         self.mediaType = mediaType
         self.posterURL = posterURL
+        self.backdropURL = backdropURL
         self.character = character
         self.releaseYear = releaseYear
         self.voteAverage = voteAverage
@@ -321,7 +327,8 @@ struct ScenePersonMediaCredit: Identifiable, Codable, Equatable, Hashable, Senda
             posterURL: posterURL?.absoluteString,
             year: releaseYear,
             rating: voteAverage,
-            overview: nil
+            overview: nil,
+            backdropURL: backdropURL?.absoluteString
         )
     }
 }

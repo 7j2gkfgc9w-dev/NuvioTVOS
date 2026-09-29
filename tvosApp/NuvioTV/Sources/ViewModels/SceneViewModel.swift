@@ -45,6 +45,10 @@ final class SceneViewModel: ObservableObject {
         selectedDetailItem != nil
     }
     
+    var isAnime: Bool {
+        coordinator.isAnime
+    }
+    
     func setMetadata(
         title: String,
         year: Int?,

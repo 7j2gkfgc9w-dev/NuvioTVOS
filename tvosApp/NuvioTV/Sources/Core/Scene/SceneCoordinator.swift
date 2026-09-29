@@ -79,12 +79,28 @@ final class SceneCoordinator: ObservableObject {
         self.activeSubtitleTextProvider = activeSubtitleText
     }
     
+    var isAnime: Bool { context?.isAnime == true }
+    
+    private func candidateActors(from candidates: [SceneCastCandidate]) -> [SceneRecognizedActor] {
+        candidates.map { candidate in
+            SceneRecognizedActor(
+                id: candidate.id,
+                name: candidate.name,
+                character: candidate.character,
+                profileURL: candidate.profileURL,
+                confidence: 1.0,
+                tmdbId: candidate.tmdbId
+            )
+        }
+    }
+    
     private func isSameMediaContext(_ a: SceneContext?, _ b: SceneContext?) -> Bool {
         guard let a, let b else { return false }
         return a.canonicalId == b.canonicalId &&
             a.timelineGeneration == b.timelineGeneration &&
             a.season == b.season &&
-            a.episode == b.episode
+            a.episode == b.episode &&
+            a.isAnime == b.isAnime
     }
 
     func updateContext(_ context: SceneContext) {
@@ -132,7 +148,12 @@ final class SceneCoordinator: ObservableObject {
         guard !isPanelOpen else { return }
         isPanelOpen = true
         currentGeneration &+= 1
-        updateActorStatus(.analyzing)
+        
+        if isAnime, !castCandidates.isEmpty {
+            updateActorStatus(.recognized(candidateActors(from: castCandidates)))
+        } else {
+            updateActorStatus(.analyzing)
+        }
         
         let gen = currentGeneration
         let isPlaying = isPlayingProvider()
@@ -173,11 +194,23 @@ final class SceneCoordinator: ObservableObject {
         needsFrameAnalysisAfterCastLoad = false
         lastAnalyzedFrameSourceTime = nil
         let currentTime = sourceTimeProvider()
+        
+        let initialActors: [SceneRecognizedActor]
+        let initialActorStatus: SceneActorStatus
+        if isAnime, !castCandidates.isEmpty {
+            let animeActors = candidateActors(from: castCandidates)
+            initialActors = animeActors
+            initialActorStatus = .recognized(animeActors)
+        } else {
+            initialActors = []
+            initialActorStatus = .analyzing
+        }
+        
         currentSnapshot = SceneSnapshot(
             timestamp: currentTime,
-            actors: [],
+            actors: initialActors,
             song: nil,
-            actorStatus: .analyzing,
+            actorStatus: initialActorStatus,
             musicStatus: isPlayingProvider() ? .listening : .requiresPlayback,
             generation: currentGeneration
         )
@@ -197,11 +230,13 @@ final class SceneCoordinator: ObservableObject {
         }
         guard isPanelOpen else { return }
         evaluateActiveSong(at: sourceTimeProvider())
-        captureAndAnalyzeCurrentFrame(forGeneration: currentGeneration)
+        if !isAnime {
+            captureAndAnalyzeCurrentFrame(forGeneration: currentGeneration)
+        }
     }
 
     func handleSubtitleTextChange(_ text: String) {
-        guard isPanelOpen, !text.isEmpty, !castCandidates.isEmpty else { return }
+        guard isPanelOpen, !isAnime, !text.isEmpty, !castCandidates.isEmpty else { return }
         let time = sourceTimeProvider()
         let candidates = self.castCandidates
         let gen = self.currentGeneration
@@ -261,7 +296,7 @@ final class SceneCoordinator: ObservableObject {
     private func fetchCastIfNeeded() {
         guard let context, castCandidates.isEmpty, !isFetchingCast else { return }
         isFetchingCast = true
-        print("[Scene] fetchCastIfNeeded() started for \"\(context.title)\" (canonicalId: \(context.canonicalId), tmdbId: \(String(describing: context.tmdbId)))")
+        print("[Scene] fetchCastIfNeeded() started for \"\(context.title)\" (canonicalId: \(context.canonicalId), tmdbId: \(String(describing: context.tmdbId)), isAnime: \(context.isAnime))")
         
         Task { [weak self, context] in
             let candidates: [SceneCastCandidate]
@@ -278,19 +313,29 @@ final class SceneCoordinator: ObservableObject {
                 self.castCandidates = candidates
                 print("[Scene] Updated castCandidates (\(candidates.count) candidates)")
                 self.triggerSubtitleTimelineScrapingIfNeeded()
-                if self.isPanelOpen, self.currentSnapshot.actors.isEmpty {
-                    self.updateActorStatus(candidates.isEmpty
-                        ? .unavailable(reason: "No cast candidates available for this title")
-                        : .preparingReferences)
-                }
-                Task {
-                    await self.actorRecognition.preloadReferences(candidates: candidates)
-                }
-                if self.isPanelOpen, !candidates.isEmpty {
-                    if self.isAnalyzingFrame {
-                        self.needsFrameAnalysisAfterCastLoad = true
-                    } else {
-                        self.captureAndAnalyzeCurrentFrame()
+                
+                if context.isAnime {
+                    let animeActors = self.candidateActors(from: candidates)
+                    if self.isPanelOpen {
+                        self.updateActorStatus(animeActors.isEmpty
+                            ? .unavailable(reason: "No cast candidates available for this episode")
+                            : .recognized(animeActors))
+                    }
+                } else {
+                    if self.isPanelOpen, self.currentSnapshot.actors.isEmpty {
+                        self.updateActorStatus(candidates.isEmpty
+                            ? .unavailable(reason: "No cast candidates available for this title")
+                            : .preparingReferences)
+                    }
+                    Task {
+                        await self.actorRecognition.preloadReferences(candidates: candidates)
+                    }
+                    if self.isPanelOpen, !candidates.isEmpty {
+                        if self.isAnalyzingFrame {
+                            self.needsFrameAnalysisAfterCastLoad = true
+                        } else {
+                            self.captureAndAnalyzeCurrentFrame()
+                        }
                     }
                 }
             }
@@ -390,10 +435,12 @@ final class SceneCoordinator: ObservableObject {
         
         // Initial immediate sample & song check
         evaluateActiveSong(at: sourceTimeProvider())
-        if isAnalyzingFrame, !isPlayingProvider() {
-            pendingPausedFrameGeneration = generation
-        } else {
-            captureAndAnalyzeCurrentFrame(forGeneration: generation)
+        if !isAnime {
+            if isAnalyzingFrame, !isPlayingProvider() {
+                pendingPausedFrameGeneration = generation
+            } else {
+                captureAndAnalyzeCurrentFrame(forGeneration: generation)
+            }
         }
         
         samplingTask = Task { [weak self] in
@@ -404,7 +451,7 @@ final class SceneCoordinator: ObservableObject {
                 await MainActor.run {
                     guard let self, self.isPanelOpen, self.currentGeneration == generation else { return }
                     self.evaluateActiveSong(at: self.sourceTimeProvider())
-                    if self.isPlayingProvider() {
+                    if self.isPlayingProvider(), !self.isAnime {
                         self.captureAndAnalyzeCurrentFrame()
                     }
                 }

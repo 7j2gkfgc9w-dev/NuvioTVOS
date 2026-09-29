@@ -333,8 +333,9 @@ private struct CompanyBrowseScrollTransitionShadow: View {
     }
 }
 
-private struct NetworkBrowseRail: View {
+struct NetworkBrowseRail: View {
     let rail: TmdbNetworkBrowseRail
+    var externalFocus: FocusState<String?>.Binding? = nil
     let onSelect: (RelatedTitle) -> Void
 
     var body: some View {
@@ -347,9 +348,13 @@ private struct NetworkBrowseRail: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .top, spacing: TmdbBrowseGridMetrics.posterGap) {
                     ForEach(rail.items) { title in
-                        ProductionBrowseCard(title: title) {
-                            onSelect(title)
-                        }
+                        ProductionBrowseCard(
+                            title: title,
+                            externalFocus: externalFocus,
+                            onSelect: {
+                                onSelect(title)
+                            }
+                        )
                     }
                 }
                 .padding(.horizontal, 80)
@@ -367,106 +372,210 @@ struct PersonBrowseView: View {
     let onBack: () -> Void
 
     @State private var detail: ScenePersonDetail? = nil
-    @State private var isLoading: Bool = true
-    @FocusState private var focusedCreditId: String?
+    @State private var isLoading = true
+    @State private var scrollOffset: CGFloat = 0
+    @FocusState private var focusedCardID: String?
     @FocusState private var placeholderFocused: Bool
     @AppStorage(SettingsKey.amoled) private var amoled = false
     @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
 
+    private var displayName: String { detail?.name ?? person.name }
+
+    private var rails: [TmdbNetworkBrowseRail] {
+        guard let detail else { return [] }
+        var list: [TmdbNetworkBrowseRail] = []
+        if !detail.movies.isEmpty {
+            list.append(
+                TmdbNetworkBrowseRail(
+                    id: "movies",
+                    title: L10n.format("details_movies_count", fallback: "Movies • %d", detail.movies.count),
+                    items: detail.movies.map(\.asRelatedTitle)
+                )
+            )
+        }
+        if !detail.series.isEmpty {
+            list.append(
+                TmdbNetworkBrowseRail(
+                    id: "series",
+                    title: L10n.format("details_series_count", fallback: "Series • %d", detail.series.count),
+                    items: detail.series.map(\.asRelatedTitle)
+                )
+            )
+        }
+        return list
+    }
+
+    private var backdropURL: URL? {
+        let movieBackdrop = detail?.movies.compactMap(\.backdropURL).first
+        let seriesBackdrop = detail?.series.compactMap(\.backdropURL).first
+        return movieBackdrop ?? seriesBackdrop
+    }
+
+    private var scrollShadowProgress: CGFloat {
+        min(max(scrollOffset / 120, 0), 1)
+    }
+
     var body: some View {
-        ZStack {
-            Color.nuvioBackground(amoled: amoled, body: bodyColor)
+        ZStack(alignment: .top) {
+            backdrop
+
+            Color.black
+                .opacity(0.78 * scrollShadowProgress)
                 .ignoresSafeArea()
+                .allowsHitTesting(false)
 
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 32) {
-                    // Top Bar with Back Button
-                    HStack {
-                        Button(action: onBack) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "chevron.left")
-                                    .font(.system(size: 16, weight: .bold))
-                                Text("Back")
-                                    .font(.system(size: 18, weight: .semibold))
-                            }
-                            .foregroundColor(.white.opacity(0.9))
-                            .padding(.horizontal, 20)
-                            .padding(.vertical, 10)
-                            .background(
-                                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                    .fill(Color.white.opacity(0.12))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 34) {
+                    GeometryReader { geometry in
+                        Color.clear
+                            .preference(
+                                key: CompanyBrowseScrollOffsetKey.self,
+                                value: geometry.frame(in: .named("person-browse-scroll")).minY
                             )
-                        }
-                        .buttonStyle(PosterCardButtonStyle())
-                        
-                        Spacer()
                     }
-                    .padding(.top, 24)
+                    .frame(height: 0)
 
-                    // Header Section: Large Portrait + Biography Metadata
-                    headerSection
+                    hero
 
-                    // Filmography Sections: Split into Movies & Series
-                    if let detail {
-                        if !detail.movies.isEmpty {
-                            creditsSection(
-                                title: "Movies",
-                                count: detail.movies.count,
-                                credits: detail.movies
-                            )
+                    if isLoading {
+                        ProgressView()
+                            .scaleEffect(1.6)
+                            .frame(maxWidth: .infinity, minHeight: 260)
+                    } else if rails.isEmpty {
+                        Text(L10n.format("details_no_titles_found_for_person", fallback: "No movies or series found for %@", displayName))
+                            .font(.system(size: 30, weight: .medium))
+                            .foregroundColor(.white.opacity(0.7))
+                            .frame(maxWidth: .infinity, minHeight: 260)
+                    } else {
+                        ForEach(rails) { rail in
+                            NetworkBrowseRail(rail: rail, externalFocus: $focusedCardID, onSelect: onSelect)
                         }
-
-                        if !detail.series.isEmpty {
-                            creditsSection(
-                                title: "Series",
-                                count: detail.series.count,
-                                credits: detail.series
-                            )
-                        }
-
-                        if detail.movies.isEmpty && detail.series.isEmpty {
-                            Text(L10n.format("details_no_titles_found_for_person", fallback: "No movies or series found for %@", person.name))
-                                .font(.system(size: 26, weight: .medium))
-                                .foregroundColor(.white.opacity(0.7))
-                                .padding(.top, 40)
-                        }
-                    } else if isLoading {
-                        HStack(spacing: 12) {
-                            ProgressView()
-                                .scaleEffect(0.9)
-                            Text("Loading filmography…")
-                                .font(.system(size: 18, weight: .medium))
-                                .foregroundColor(.white.opacity(0.6))
-                        }
-                        .padding(.top, 16)
                     }
                 }
-                .padding(.horizontal, 64)
-                .padding(.bottom, 60)
+                .padding(.bottom, 70)
             }
+            .focusSection()
+            .coordinateSpace(name: "person-browse-scroll")
+            .modifier(CompanyBrowseScrollTracker(offset: $scrollOffset))
 
-            if detail == nil && !isLoading {
+            CompanyBrowseScrollTransitionShadow(progress: scrollShadowProgress)
+
+            if isLoading || rails.isEmpty {
                 placeholderFocusAnchor
             }
         }
+        .defaultFocusIfAvailable($focusedCardID, rails.first?.items.first?.id)
+        .onChange(of: rails.first?.items.first?.id) { _, newFirstID in
+            if focusedCardID == nil, let newFirstID {
+                focusedCardID = newFirstID
+            }
+        }
+        .ignoresSafeArea(edges: .top)
         .onExitCommand(perform: onBack)
         .task(id: person.id) {
             isLoading = true
             let provider = TmdbSceneCastProvider()
             detail = await provider.fetchPersonDetail(for: person)
             isLoading = false
-            if let firstMovie = detail?.movies.first {
-                focusedCreditId = firstMovie.id
-            } else if let firstSeries = detail?.series.first {
-                focusedCreditId = firstSeries.id
+            if focusedCardID == nil, let firstID = rails.first?.items.first?.id {
+                focusedCardID = firstID
             }
         }
     }
 
-    @ViewBuilder
-    private var headerSection: some View {
-        HStack(alignment: .top, spacing: 36) {
-            // Actor Portrait Card
+    private var backdrop: some View {
+        let backdropColor = Color.nuvioBackground(amoled: amoled, body: bodyColor)
+
+        return ZStack(alignment: .top) {
+            backdropColor
+                .ignoresSafeArea()
+
+            if let backdropURL {
+                ZStack {
+                    AsyncImage(url: backdropURL) { phase in
+                        if case .success(let image) = phase {
+                            image
+                                .resizable()
+                                .scaledToFill()
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: 520)
+                    .clipped()
+                    .blur(radius: 8, opaque: true)
+
+                    GeometryReader { proxy in
+                        LinearGradient(
+                            stops: [
+                                .init(color: backdropColor.opacity(0.96), location: 0),
+                                .init(color: backdropColor.opacity(0.86), location: 0.25),
+                                .init(color: backdropColor.opacity(0.64), location: 0.50),
+                                .init(color: backdropColor.opacity(0.34), location: 0.70),
+                                .init(color: backdropColor.opacity(0.10), location: 0.88),
+                                .init(color: .clear, location: 1)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                        .frame(width: proxy.size.width * 0.76)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                    }
+
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0.0),
+                            .init(color: backdropColor.opacity(0.4), location: 0.35),
+                            .init(color: backdropColor.opacity(0.85), location: 0.7),
+                            .init(color: backdropColor, location: 1.0)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
+                .frame(maxWidth: .infinity, maxHeight: 520)
+                .clipped()
+            }
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+    }
+
+    private var hero: some View {
+        HStack(alignment: .bottom, spacing: 50) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(categoryLabel)
+                    .font(.system(size: 32, weight: .medium))
+                    .foregroundColor(.white.opacity(0.72))
+
+                Text(displayName)
+                    .font(.system(size: 64, weight: .bold))
+                    .foregroundColor(.white)
+                    .lineLimit(2)
+
+                let metaParts = [
+                    detail?.birthInfo,
+                    detail?.placeOfBirth
+                ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+
+                if !metaParts.isEmpty {
+                    Text(metaParts.joined(separator: " • "))
+                        .font(.system(size: 26, weight: .regular))
+                        .foregroundColor(.white.opacity(0.68))
+                        .lineLimit(2)
+                }
+
+                if let bio = detail?.biography, !bio.isEmpty {
+                    Text(bio)
+                        .font(.system(size: 20, weight: .regular))
+                        .foregroundColor(.white.opacity(0.82))
+                        .lineSpacing(4)
+                        .lineLimit(4)
+                        .padding(.top, 4)
+                }
+            }
+
+            Spacer(minLength: 20)
+
+            // Right-side portrait card matching streaming service logo / hero style
             ZStack {
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
                     .fill(Color.white.opacity(0.08))
@@ -497,91 +606,17 @@ struct PersonBrowseView: View {
                     .stroke(Color.white.opacity(0.18), lineWidth: 1.5)
             )
             .shadow(color: Color.black.opacity(0.55), radius: 20, y: 8)
-
-            // Actor Bio Metadata
-            VStack(alignment: .leading, spacing: 8) {
-                Text(detail?.name ?? person.name)
-                    .font(.system(size: 38, weight: .bold))
-                    .foregroundColor(.white)
-                    .lineLimit(1)
-
-                if let role = person.role, !role.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text("as \(role)")
-                        .font(.system(size: 22, weight: .medium))
-                        .foregroundColor(.white.opacity(0.75))
-                        .lineLimit(1)
-                }
-
-                if let birthInfo = detail?.birthInfo {
-                    Text(birthInfo)
-                        .font(.system(size: 20, weight: .regular))
-                        .foregroundColor(.white.opacity(0.68))
-                        .lineLimit(1)
-                }
-
-                if let placeOfBirth = detail?.placeOfBirth, !placeOfBirth.isEmpty {
-                    Text(placeOfBirth)
-                        .font(.system(size: 20, weight: .regular))
-                        .foregroundColor(.white.opacity(0.68))
-                        .lineLimit(1)
-                }
-
-                if let bio = detail?.biography, !bio.isEmpty {
-                    Text(bio)
-                        .font(.system(size: 19, weight: .regular))
-                        .foregroundColor(.white.opacity(0.85))
-                        .lineSpacing(4)
-                        .padding(.top, 6)
-                } else if detail != nil {
-                    Text("No biography available.")
-                        .font(.system(size: 19, weight: .regular))
-                        .foregroundColor(.white.opacity(0.5))
-                        .padding(.top, 6)
-                } else if isLoading {
-                    HStack(spacing: 10) {
-                        ProgressView()
-                            .scaleEffect(0.8)
-                        Text("Loading biography…")
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundColor(.white.opacity(0.6))
-                    }
-                    .padding(.top, 8)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .padding(.horizontal, 80)
+        .padding(.top, 72)
+        .frame(maxWidth: .infinity, minHeight: 390, alignment: .bottom)
     }
 
-    @ViewBuilder
-    private func creditsSection(
-        title: String,
-        count: Int,
-        credits: [ScenePersonMediaCredit]
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                Text(title)
-                    .font(.system(size: 26, weight: .bold))
-                    .foregroundColor(.white)
-
-                Text("\(count)")
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundColor(.white.opacity(0.5))
-            }
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 20) {
-                    ForEach(credits) { credit in
-                        PersonCreditPosterCard(credit: credit) {
-                            onSelect(credit.asRelatedTitle)
-                        }
-                        .focused($focusedCreditId, equals: credit.id)
-                    }
-                }
-                .padding(.horizontal, 4)
-                .padding(.vertical, 16)
-            }
+    private var categoryLabel: String {
+        if let role = person.role, !role.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return role
         }
+        return "Cast & Crew"
     }
 
     private var personFallback: some View {
@@ -604,88 +639,7 @@ struct PersonBrowseView: View {
     }
 }
 
-// MARK: - Person Credit Poster Card
-
-private struct PersonCreditPosterCard: View {
-    let credit: ScenePersonMediaCredit
-    let onSelect: () -> Void
-
-    @FocusState private var isFocused: Bool
-
-    var body: some View {
-        Button(action: onSelect) {
-            VStack(alignment: .leading, spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(Color.white.opacity(0.08))
-                        .frame(width: 140, height: 210)
-
-                    if let url = credit.posterURL {
-                        AsyncImage(url: url) { phase in
-                            switch phase {
-                            case .success(let image):
-                                image
-                                    .resizable()
-                                    .scaledToFill()
-                                    .frame(width: 140, height: 210)
-                                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                            case .failure, .empty:
-                                placeholderImage
-                            @unknown default:
-                                placeholderImage
-                            }
-                        }
-                    } else {
-                        placeholderImage
-                    }
-                }
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(
-                            isFocused ? Color.white.opacity(0.9) : Color.white.opacity(0.12),
-                            lineWidth: isFocused ? 2.5 : 1
-                        )
-                )
-                .shadow(
-                    color: isFocused ? Color.white.opacity(0.25) : Color.black.opacity(0.4),
-                    radius: isFocused ? 14 : 6,
-                    y: 3
-                )
-
-                Text(credit.title)
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundColor(isFocused ? .white : .white.opacity(0.85))
-                    .lineLimit(1)
-                    .frame(width: 140, alignment: .leading)
-            }
-        }
-        .buttonStyle(PosterCardButtonStyle())
-        .focused($isFocused)
-        .focusEffectDisabledIfAvailable()
-        .titleActionsContextMenu(
-            meta: credit.asRelatedTitle.asMeta,
-            onOpenDetails: onSelect
-        )
-        .scaleEffect(isFocused ? 1.05 : 1.0)
-        .animation(.easeOut(duration: 0.14), value: isFocused)
-        .accessibilityLabel(credit.title)
-    }
-
-    private var placeholderImage: some View {
-        ZStack {
-            Color.white.opacity(0.06)
-            Image(systemName: credit.mediaType == "tv" ? "tv" : "film")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 44, height: 44)
-                .foregroundColor(.white.opacity(0.35))
-        }
-        .frame(width: 140, height: 210)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-}
-
-private enum TmdbBrowseGridMetrics {
+enum TmdbBrowseGridMetrics {
     static let posterWidth: CGFloat = 210
     static let posterHeight: CGFloat = 315
     static let posterGap: CGFloat = 28
@@ -699,9 +653,10 @@ private enum TmdbBrowseGridMetrics {
     }
 }
 
-private struct ProductionBrowseCard: View {
+struct ProductionBrowseCard: View {
     let title: RelatedTitle
     let alwaysShowLabels: Bool
+    var externalFocus: FocusState<String?>.Binding?
     let onSelect: () -> Void
 
     @FocusState private var isFocused: Bool
@@ -722,14 +677,25 @@ private struct ProductionBrowseCard: View {
     init(
         title: RelatedTitle,
         alwaysShowLabels: Bool = false,
+        externalFocus: FocusState<String?>.Binding? = nil,
         onSelect: @escaping () -> Void
     ) {
         self.title = title
         self.alwaysShowLabels = alwaysShowLabels
+        self.externalFocus = externalFocus
         self.onSelect = onSelect
     }
 
     var body: some View {
+        if let externalFocus {
+            cardButton
+                .focused(externalFocus, equals: title.id)
+        } else {
+            cardButton
+        }
+    }
+
+    private var cardButton: some View {
         Button(action: onSelect) {
             VStack(alignment: .leading, spacing: 12) {
                 ZStack {

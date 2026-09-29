@@ -4,6 +4,8 @@ struct SceneDetailView: View {
     let item: SceneDetailItem
     let onDismiss: () -> Void
     
+    @FocusState private var focusedCardID: String?
+    @FocusState private var placeholderFocused: Bool
     @FocusState private var focusedButton: DetailButtonFocus?
     
     private enum DetailButtonFocus: Hashable {
@@ -17,9 +19,9 @@ struct SceneDetailView: View {
     }
     
     var body: some View {
-        ZStack {
-            // Backdrop
-            Color.black.opacity(0.88)
+        ZStack(alignment: .top) {
+            // Translucent see-through backdrop over video
+            Color.black.opacity(0.85)
                 .ignoresSafeArea()
                 .onTapGesture {
                     onDismiss()
@@ -32,6 +34,7 @@ struct SceneDetailView: View {
                 songDetailView(song: song)
             }
         }
+        .ignoresSafeArea(edges: .top)
         .onExitCommand {
             onDismiss()
         }
@@ -39,81 +42,126 @@ struct SceneDetailView: View {
     
     // MARK: - Actor Detail Layout
     
+    private func rails(for detail: ScenePersonDetail?) -> [TmdbNetworkBrowseRail] {
+        guard let detail else { return [] }
+        var list: [TmdbNetworkBrowseRail] = []
+        if !detail.movies.isEmpty {
+            list.append(
+                TmdbNetworkBrowseRail(
+                    id: "movies",
+                    title: L10n.format("details_movies_count", fallback: "Movies • %d", detail.movies.count),
+                    items: detail.movies.map(\.asRelatedTitle)
+                )
+            )
+        }
+        if !detail.series.isEmpty {
+            list.append(
+                TmdbNetworkBrowseRail(
+                    id: "series",
+                    title: L10n.format("details_series_count", fallback: "Series • %d", detail.series.count),
+                    items: detail.series.map(\.asRelatedTitle)
+                )
+            )
+        }
+        return list
+    }
+    
     @ViewBuilder
     private func actorDetailView(actor: SceneRecognizedActor, detail: ScenePersonDetail?) -> some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 32) {
-                // Top Action Bar with Dismiss button
-                HStack {
-                    Spacer()
-                    Button(action: onDismiss) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 16, weight: .bold))
-                            Text("Done")
-                                .font(.system(size: 18, weight: .semibold))
-                        }
-                        .foregroundColor(.white.opacity(0.9))
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .fill(Color.white.opacity(0.12))
-                        )
-                    }
-                    .buttonStyle(PosterCardButtonStyle())
-                    .focused($focusedButton, equals: .dismiss)
-                }
-                .padding(.top, 24)
-                
-                // Top Header: Portrait + Bio metadata
-                actorHeader(actor: actor, detail: detail)
-                
-                // Bottom Sections: Split into Movies & Series
-                if let detail {
-                    if !detail.movies.isEmpty {
-                        creditsSection(
-                            title: "Movies",
-                            count: detail.movies.count,
-                            credits: detail.movies
-                        )
-                    }
+        let personRails = rails(for: detail)
+        
+        ZStack(alignment: .topLeading) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 34) {
+                    // Hero: Category + Name + Birth/Origin metadata + Bio + Portrait Card
+                    actorHero(actor: actor, detail: detail)
                     
-                    if !detail.series.isEmpty {
-                        creditsSection(
-                            title: "Series",
-                            count: detail.series.count,
-                            credits: detail.series
-                        )
-                    }
-                } else if actor.tmdbId != nil {
-                    HStack(spacing: 12) {
+                    // Filmography Rails: Movies & Series
+                    if let detail {
+                        if personRails.isEmpty {
+                            Text(L10n.format("details_no_titles_found_for_person", fallback: "No movies or series found for %@", detail.name))
+                                .font(.system(size: 30, weight: .medium))
+                                .foregroundColor(.white.opacity(0.7))
+                                .frame(maxWidth: .infinity, minHeight: 260)
+                        } else {
+                            ForEach(personRails) { rail in
+                                NetworkBrowseRail(rail: rail, externalFocus: $focusedCardID, onSelect: { _ in })
+                            }
+                        }
+                    } else if actor.tmdbId != nil {
                         ProgressView()
-                            .scaleEffect(0.9)
-                        Text("Loading filmography…")
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundColor(.white.opacity(0.6))
+                            .scaleEffect(1.6)
+                            .frame(maxWidth: .infinity, minHeight: 260)
                     }
-                    .padding(.top, 16)
                 }
+                .padding(.bottom, 70)
             }
-            .padding(.horizontal, 64)
-            .padding(.bottom, 60)
+            .focusSection()
+            .coordinateSpace(name: "insight-actor-scroll")
+            
+            if detail == nil || personRails.isEmpty {
+                placeholderFocusAnchor
+            }
+        }
+        .defaultFocusIfAvailable($focusedCardID, personRails.first?.items.first?.id)
+        .onChange(of: personRails.first?.items.first?.id) { _, newFirstID in
+            if focusedCardID == nil, let newFirstID {
+                focusedCardID = newFirstID
+            }
+        }
+        .onAppear {
+            if focusedCardID == nil, let firstID = personRails.first?.items.first?.id {
+                focusedCardID = firstID
+            }
         }
     }
     
     @ViewBuilder
-    private func actorHeader(actor: SceneRecognizedActor, detail: ScenePersonDetail?) -> some View {
-        HStack(alignment: .top, spacing: 36) {
-            // Actor Portrait Card
+    private func actorHero(actor: SceneRecognizedActor, detail: ScenePersonDetail?) -> some View {
+        HStack(alignment: .bottom, spacing: 50) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(categoryLabel(actor: actor))
+                    .font(.system(size: 32, weight: .medium))
+                    .foregroundColor(.white.opacity(0.72))
+                
+                Text(detail?.name ?? actor.name)
+                    .font(.system(size: 64, weight: .bold))
+                    .foregroundColor(.white)
+                    .lineLimit(2)
+                
+                let metaParts = [
+                    detail?.birthInfo,
+                    detail?.placeOfBirth
+                ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+                
+                if !metaParts.isEmpty {
+                    Text(metaParts.joined(separator: " • "))
+                        .font(.system(size: 26, weight: .regular))
+                        .foregroundColor(.white.opacity(0.68))
+                        .lineLimit(2)
+                }
+                
+                if let bio = detail?.biography, !bio.isEmpty {
+                    Text(bio)
+                        .font(.system(size: 20, weight: .regular))
+                        .foregroundColor(.white.opacity(0.82))
+                        .lineSpacing(4)
+                        .lineLimit(4)
+                        .padding(.top, 4)
+                }
+            }
+            
+            Spacer(minLength: 20)
+            
+            // Right-side portrait card matching streaming service template collection
             ZStack {
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
                     .fill(Color.white.opacity(0.08))
                     .frame(width: 200, height: 280)
                 
-                let imageURL = detail?.profileURL ?? actor.profileURL
-                if let imageURL {
-                    AsyncImage(url: imageURL) { phase in
+                let profileURL = detail?.profileURL ?? actor.profileURL
+                if let profileURL {
+                    AsyncImage(url: profileURL) { phase in
                         switch phase {
                         case .success(let image):
                             image
@@ -136,59 +184,17 @@ struct SceneDetailView: View {
                     .stroke(Color.white.opacity(0.18), lineWidth: 1.5)
             )
             .shadow(color: Color.black.opacity(0.55), radius: 20, y: 8)
-            
-            // Actor Bio Metadata
-            VStack(alignment: .leading, spacing: 8) {
-                Text(detail?.name ?? actor.name)
-                    .font(.system(size: 38, weight: .bold))
-                    .foregroundColor(.white)
-                    .lineLimit(1)
-                
-                if let character = actor.character, !character.isEmpty {
-                    Text("as \(character)")
-                        .font(.system(size: 22, weight: .medium))
-                        .foregroundColor(.white.opacity(0.75))
-                        .lineLimit(1)
-                }
-                
-                if let birthInfo = detail?.birthInfo {
-                    Text(birthInfo)
-                        .font(.system(size: 20, weight: .regular))
-                        .foregroundColor(.white.opacity(0.68))
-                        .lineLimit(1)
-                }
-                
-                if let placeOfBirth = detail?.placeOfBirth, !placeOfBirth.isEmpty {
-                    Text(placeOfBirth)
-                        .font(.system(size: 20, weight: .regular))
-                        .foregroundColor(.white.opacity(0.68))
-                        .lineLimit(1)
-                }
-                
-                if let bio = detail?.biography, !bio.isEmpty {
-                    Text(bio)
-                        .font(.system(size: 19, weight: .regular))
-                        .foregroundColor(.white.opacity(0.85))
-                        .lineSpacing(4)
-                        .padding(.top, 6)
-                } else if detail != nil {
-                    Text("No biography available.")
-                        .font(.system(size: 19, weight: .regular))
-                        .foregroundColor(.white.opacity(0.5))
-                        .padding(.top, 6)
-                } else if actor.tmdbId != nil {
-                    HStack(spacing: 10) {
-                        ProgressView()
-                            .scaleEffect(0.8)
-                        Text("Loading biography…")
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundColor(.white.opacity(0.6))
-                    }
-                    .padding(.top, 8)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .padding(.horizontal, 80)
+        .padding(.top, 72)
+        .frame(maxWidth: .infinity, minHeight: 390, alignment: .bottom)
+    }
+    
+    private func categoryLabel(actor: SceneRecognizedActor) -> String {
+        if let char = actor.character, !char.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "as \(char)"
+        }
+        return "Actor"
     }
     
     private var actorPlaceholderAvatar: some View {
@@ -199,63 +205,48 @@ struct SceneDetailView: View {
             .foregroundColor(.white.opacity(0.35))
     }
     
-    @ViewBuilder
-    private func creditsSection(
-        title: String,
-        count: Int,
-        credits: [ScenePersonMediaCredit]
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            // Section Header with count badge
-            HStack(spacing: 12) {
-                Text(title)
-                    .font(.system(size: 26, weight: .bold))
-                    .foregroundColor(.white)
-                
-                Text("\(count)")
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundColor(.white.opacity(0.5))
+    private var placeholderFocusAnchor: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .focusable(true)
+            .focused($placeholderFocused)
+            .focusEffectDisabledIfAvailable()
+            .onAppear {
+                DispatchQueue.main.async { placeholderFocused = true }
             }
-            
-            // Horizontal poster carousel with ample vertical padding against focus clipping
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 20) {
-                    ForEach(credits) { credit in
-                        SceneCreditPosterCard(credit: credit)
-                    }
-                }
-                .padding(.horizontal, 4)
-                .padding(.vertical, 16)
-            }
-        }
     }
     
     // MARK: - Song Detail Layout
     
     @ViewBuilder
     private func songDetailView(song: SceneRecognizedSong) -> some View {
-        VStack(spacing: 24) {
-            songDetailContent(song: song)
-        }
-        .padding(40)
-        .frame(maxWidth: 880)
-        .background {
-            if #available(tvOS 26.0, *) {
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .fill(Color.black.opacity(0.28))
-                    .background(Color.white.opacity(0.08), in: .rect(cornerRadius: 28))
-                    .glassEffect(.regular, in: .rect(cornerRadius: 28))
-            } else {
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .fill(Color.black.opacity(0.40))
-                    .background(RoundedRectangle(cornerRadius: 28, style: .continuous).fill(.ultraThinMaterial))
+        VStack {
+            Spacer()
+            VStack(spacing: 24) {
+                songDetailContent(song: song)
             }
+            .padding(40)
+            .frame(maxWidth: 880)
+            .background {
+                if #available(tvOS 26.0, *) {
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .fill(Color.black.opacity(0.28))
+                        .background(Color.white.opacity(0.08), in: .rect(cornerRadius: 28))
+                        .glassEffect(.regular, in: .rect(cornerRadius: 28))
+                } else {
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .fill(Color.black.opacity(0.40))
+                        .background(RoundedRectangle(cornerRadius: 28, style: .continuous).fill(.ultraThinMaterial))
+                }
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1.5)
+            )
+            .shadow(color: Color.black.opacity(0.45), radius: 30, y: 10)
+            Spacer()
         }
-        .overlay(
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .stroke(Color.white.opacity(0.18), lineWidth: 1.5)
-        )
-        .shadow(color: Color.black.opacity(0.45), radius: 30, y: 10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .defaultFocus($focusedButton, .dismiss)
     }
     
@@ -344,81 +335,5 @@ struct SceneDetailView: View {
             }
         }
         .frame(minHeight: 240)
-    }
-}
-
-// MARK: - Scene Credit Poster Card
-
-private struct SceneCreditPosterCard: View {
-    let credit: ScenePersonMediaCredit
-    
-    @FocusState private var isFocused: Bool
-    
-    var body: some View {
-        Button(action: {}) {
-            VStack(alignment: .leading, spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(Color.white.opacity(0.08))
-                        .frame(width: 140, height: 210)
-                    
-                    if let url = credit.posterURL {
-                        AsyncImage(url: url) { phase in
-                            switch phase {
-                            case .success(let image):
-                                image
-                                    .resizable()
-                                    .scaledToFill()
-                                    .frame(width: 140, height: 210)
-                                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                            case .failure, .empty:
-                                placeholderImage
-                            @unknown default:
-                                placeholderImage
-                            }
-                        }
-                    } else {
-                        placeholderImage
-                    }
-                }
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(
-                            isFocused ? Color.white.opacity(0.9) : Color.white.opacity(0.12),
-                            lineWidth: isFocused ? 2.5 : 1
-                        )
-                )
-                .shadow(
-                    color: isFocused ? Color.white.opacity(0.25) : Color.black.opacity(0.4),
-                    radius: isFocused ? 14 : 6,
-                    y: 3
-                )
-                
-                Text(credit.title)
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundColor(isFocused ? .white : .white.opacity(0.85))
-                    .lineLimit(1)
-                    .frame(width: 140, alignment: .leading)
-            }
-        }
-        .buttonStyle(PosterCardButtonStyle())
-        .focused($isFocused)
-        .focusEffectDisabledIfAvailable()
-        .scaleEffect(isFocused ? 1.05 : 1.0)
-        .animation(.easeOut(duration: 0.14), value: isFocused)
-        .accessibilityLabel(credit.title)
-    }
-    
-    private var placeholderImage: some View {
-        ZStack {
-            Color.white.opacity(0.06)
-            Image(systemName: credit.mediaType == "tv" ? "tv" : "film")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 44, height: 44)
-                .foregroundColor(.white.opacity(0.35))
-        }
-        .frame(width: 140, height: 210)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
