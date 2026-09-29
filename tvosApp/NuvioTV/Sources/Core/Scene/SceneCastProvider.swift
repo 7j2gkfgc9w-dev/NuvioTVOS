@@ -2,12 +2,17 @@ import Foundation
 
 protocol SceneCastProviding: Sendable {
     func fetchCast(context: SceneContext) async throws -> [SceneCastCandidate]
+    func fetchPersonDetail(personId: Int) async -> ScenePersonDetail?
     func fetchPersonBiography(personId: Int) async -> String?
 }
 
 extension SceneCastProviding {
-    func fetchPersonBiography(personId: Int) async -> String? {
+    func fetchPersonDetail(personId: Int) async -> ScenePersonDetail? {
         nil
+    }
+    
+    func fetchPersonBiography(personId: Int) async -> String? {
+        await fetchPersonDetail(personId: personId)?.biography
     }
 }
 
@@ -213,23 +218,150 @@ final class TmdbSceneCastProvider: SceneCastProviding {
         return candidates
     }
     
-    func fetchPersonBiography(personId: Int) async -> String? {
+    func fetchPersonDetail(personId: Int) async -> ScenePersonDetail? {
         guard let apiKey = apiKeyProvider(), !apiKey.isEmpty else { return nil }
-        let urlString = "https://api.themoviedb.org/3/person/\(personId)?api_key=\(apiKey)&language=en-US"
+        let urlString = "https://api.themoviedb.org/3/person/\(personId)?api_key=\(apiKey)&append_to_response=combined_credits&language=en-US"
         guard let url = URL(string: urlString),
               let (data, response) = try? await urlSession.data(from: url),
               let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
-              let payload = try? JSONDecoder().decode(TmdbPersonDetailPayload.self, from: data) else {
+              let payload = try? JSONDecoder().decode(TmdbPersonFullPayload.self, from: data) else {
             return nil
         }
-        return payload.biography?.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        let profileURL = payload.profilePath.flatMap { path -> URL? in
+            let clean = path.hasPrefix("/") ? String(path.dropFirst()) : path
+            return URL(string: "https://image.tmdb.org/t/p/h632/\(clean)")
+        }
+        
+        var seenMovieIds = Set<Int>()
+        var seenSeriesIds = Set<Int>()
+        var movies: [ScenePersonMediaCredit] = []
+        var series: [ScenePersonMediaCredit] = []
+        
+        // Sort all credits by popularity descending
+        let allCredits = (payload.combinedCredits?.cast ?? []).sorted { ($0.popularity ?? 0) > ($1.popularity ?? 0) }
+        
+        for item in allCredits {
+            let isTv = item.mediaType == "tv"
+            let isMovie = item.mediaType == "movie" || (!isTv && item.title != nil)
+            let title = (isTv ? item.name : item.title) ?? item.title ?? item.name ?? ""
+            guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            
+            let posterURL = item.posterPath.flatMap { path -> URL? in
+                let clean = path.hasPrefix("/") ? String(path.dropFirst()) : path
+                return URL(string: "https://image.tmdb.org/t/p/w500/\(clean)")
+            }
+            
+            let year: String?
+            if isTv {
+                year = item.firstAirDate.flatMap { $0.count >= 4 ? String($0.prefix(4)) : nil }
+            } else {
+                year = item.releaseDate.flatMap { $0.count >= 4 ? String($0.prefix(4)) : nil }
+            }
+            
+            let credit = ScenePersonMediaCredit(
+                id: "\(isTv ? "tv" : "movie")-\(item.id)",
+                tmdbId: item.id,
+                title: title,
+                mediaType: isTv ? "tv" : "movie",
+                posterURL: posterURL,
+                character: item.character?.trimmingCharacters(in: .whitespacesAndNewlines),
+                releaseYear: year,
+                voteAverage: item.voteAverage
+            )
+            
+            if isTv {
+                if seenSeriesIds.insert(item.id).inserted {
+                    series.append(credit)
+                }
+            } else if isMovie {
+                if seenMovieIds.insert(item.id).inserted {
+                    movies.append(credit)
+                }
+            }
+        }
+        
+        return ScenePersonDetail(
+            id: payload.id,
+            name: payload.name ?? "",
+            biography: payload.biography?.trimmingCharacters(in: .whitespacesAndNewlines),
+            birthday: payload.birthday,
+            deathday: payload.deathday,
+            placeOfBirth: payload.placeOfBirth?.trimmingCharacters(in: .whitespacesAndNewlines),
+            profileURL: profileURL,
+            movies: movies,
+            series: series
+        )
+    }
+    
+    func fetchPersonDetail(for person: TmdbPersonMetadata) async -> ScenePersonDetail? {
+        if let tmdbId = person.tmdbId, tmdbId > 0 {
+            return await fetchPersonDetail(personId: tmdbId)
+        }
+        guard let apiKey = apiKeyProvider(), !apiKey.isEmpty else { return nil }
+        guard let encodedName = person.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
+        let urlString = "https://api.themoviedb.org/3/search/person?query=\(encodedName)&api_key=\(apiKey)&language=en-US"
+        guard let url = URL(string: urlString),
+              let (data, response) = try? await urlSession.data(from: url),
+              let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+              let searchResult = try? JSONDecoder().decode(TmdbPersonSearchPayload.self, from: data),
+              let firstId = searchResult.results?.first?.id else {
+            return nil
+        }
+        return await fetchPersonDetail(personId: firstId)
+    }
+    
+    func fetchPersonBiography(personId: Int) async -> String? {
+        await fetchPersonDetail(personId: personId)?.biography
     }
 }
 
 // MARK: - Internal DTOs
 
-private struct TmdbPersonDetailPayload: Decodable {
+private struct TmdbPersonFullPayload: Decodable {
+    let id: Int
+    let name: String?
     let biography: String?
+    let birthday: String?
+    let deathday: String?
+    let placeOfBirth: String?
+    let profilePath: String?
+    let combinedCredits: TmdbCombinedCreditsPayload?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, biography, birthday, deathday
+        case placeOfBirth = "place_of_birth"
+        case profilePath = "profile_path"
+        case combinedCredits = "combined_credits"
+    }
+}
+
+private struct TmdbCombinedCreditsPayload: Decodable {
+    let cast: [TmdbCombinedCreditCastItemPayload]?
+}
+
+private struct TmdbCombinedCreditCastItemPayload: Decodable {
+    let id: Int
+    let title: String?
+    let name: String?
+    let mediaType: String?
+    let character: String?
+    let posterPath: String?
+    let releaseDate: String?
+    let firstAirDate: String?
+    let voteAverage: Double?
+    let popularity: Double?
+    let voteCount: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, name, character, popularity
+        case mediaType = "media_type"
+        case posterPath = "poster_path"
+        case releaseDate = "release_date"
+        case firstAirDate = "first_air_date"
+        case voteAverage = "vote_average"
+        case voteCount = "vote_count"
+    }
 }
 
 private struct TmdbCreditsPayload: Decodable {
@@ -278,5 +410,13 @@ private struct TmdbFindPayload: Decodable {
 }
 
 private struct TmdbFindItemPayload: Decodable {
+    let id: Int?
+}
+
+private struct TmdbPersonSearchPayload: Decodable {
+    let results: [TmdbPersonSearchResultPayload]?
+}
+
+private struct TmdbPersonSearchResultPayload: Decodable {
     let id: Int?
 }
