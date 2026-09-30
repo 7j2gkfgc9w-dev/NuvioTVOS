@@ -9161,7 +9161,7 @@ private struct JellyfinServerEditSheet: View {
                 switch authKind {
                 case .apiKey:
                     token = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-                    userId = try await JellyfinClient.currentUserId(baseURL: baseURL, apiKey: token)
+                    userId = try await JellyfinClient.currentUserId(baseURL: baseURL, apiKey: token, username: username)
                 case .login:
                     let result = try await JellyfinSessionManager.login(baseURL: baseURL, username: username, password: password)
                     token = result.accessToken
