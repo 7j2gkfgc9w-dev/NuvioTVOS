@@ -252,6 +252,47 @@ final class PlayerControlsSettingsTests: XCTestCase {
         XCTAssertTrue(builtInTrack.externalFilename.isEmpty)
         XCTAssertFalse(externalTrack.externalFilename.isEmpty)
     }
+
+    @MainActor
+    func testMergeExternalSubtitlesUpdatesExistingLabelsAndAppendsNew() {
+        let model = PlayerViewModel(
+            sessionCoordinator: PlaybackSessionCoordinator(aetherControllerFactory: { nil })
+        )
+        let initialSub1 = NuvioSubtitle(
+            url: "https://subs.strem.io/file/1.srt",
+            language: "eng",
+            label: "OpenSubtitles",
+            source: "OpenSubtitles v3"
+        )
+        let initialSub2 = NuvioSubtitle(
+            url: "https://subs.strem.io/file/2.srt",
+            language: "spa",
+            label: nil,
+            source: "OpenSubtitles v3"
+        )
+        model.availableExternalSubtitles = [initialSub1, initialSub2]
+
+        let updatedSub1 = NuvioSubtitle(
+            url: "https://subs.strem.io/file/1.srt",
+            language: "eng",
+            label: "The.Batman.2022.1080p.WEBRip.x264-RARBG",
+            source: "OpenSubtitles v3"
+        )
+        let newSub3 = NuvioSubtitle(
+            url: "https://subs.strem.io/file/3.srt",
+            language: "fre",
+            label: "French.Release.1080p",
+            source: "SubDL"
+        )
+
+        model.mergeExternalSubtitles([updatedSub1, newSub3])
+
+        XCTAssertEqual(model.availableExternalSubtitles.count, 3)
+        XCTAssertEqual(model.availableExternalSubtitles[0].label, "The.Batman.2022.1080p.WEBRip.x264-RARBG")
+        XCTAssertEqual(model.availableExternalSubtitles[1].label, nil)
+        XCTAssertEqual(model.availableExternalSubtitles[2].url, "https://subs.strem.io/file/3.srt")
+        XCTAssertEqual(model.availableExternalSubtitles[2].label, "French.Release.1080p")
+    }
 }
 @MainActor
 private final class ControlledScrubThumbnailProvider: ScrubThumbnailProviding {

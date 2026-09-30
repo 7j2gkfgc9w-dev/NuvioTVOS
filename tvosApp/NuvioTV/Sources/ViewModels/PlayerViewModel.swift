@@ -1194,20 +1194,47 @@ class PlayerViewModel: ObservableObject {
         }
     }
 
-    private func mergeExternalSubtitles(_ fetched: [NuvioSubtitle]) {
-        var seen = Set(availableExternalSubtitles.map(\.url))
-        let newSubtitles = fetched.filter { seen.insert($0.url).inserted }
-        guard !newSubtitles.isEmpty else { return }
-        availableExternalSubtitles += newSubtitles
+    func mergeExternalSubtitles(_ fetched: [NuvioSubtitle]) {
+        guard !fetched.isEmpty else { return }
+        var hasChanges = false
+        var newlyAdded: [NuvioSubtitle] = []
+
+        var existingIndices: [String: Int] = [:]
+        for (index, sub) in availableExternalSubtitles.enumerated() {
+            existingIndices[sub.url] = index
+        }
+
+        for sub in fetched {
+            if let index = existingIndices[sub.url] {
+                let existing = availableExternalSubtitles[index]
+                if existing != sub {
+                    availableExternalSubtitles[index] = sub
+                    hasChanges = true
+                    if let pendingIndex = pendingExternalSubtitles.firstIndex(where: { $0.url == sub.url }) {
+                        pendingExternalSubtitles[pendingIndex] = sub
+                    }
+                }
+            } else {
+                availableExternalSubtitles.append(sub)
+                existingIndices[sub.url] = availableExternalSubtitles.count - 1
+                newlyAdded.append(sub)
+                hasChanges = true
+            }
+        }
+
+        guard hasChanges else { return }
+
         if isSceneEnabled {
             sceneCoordinator.updateAvailableSubtitles(availableExternalSubtitles)
         }
 
-        let smartMatched = Self.smartMatchedSubtitles(in: newSubtitles)
-        for subtitle in smartMatched where !pendingExternalSubtitles.contains(where: { $0.url == subtitle.url }) {
+        let smartMatched = Self.smartMatchedSubtitles(in: fetched)
+        var addedAnyPending = false
+        for subtitle in smartMatched where !pendingExternalSubtitles.contains(where: { $0.url == subtitle.url }) && !addedExternalSubtitleURLs.contains(subtitle.url) {
             pendingExternalSubtitles.append(subtitle)
+            addedAnyPending = true
         }
-        if !smartMatched.isEmpty {
+        if addedAnyPending {
             if pendingTrackSelection?.subtitle == nil, !hasExplicitSubtitleSelection {
                 didApplySubtitlePreference = false
             }

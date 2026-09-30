@@ -593,11 +593,17 @@ struct PlayerControls: View {
 
     private func sanitizeSubtitleLabel(_ raw: String?) -> String? {
         guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
-        // Filter out hashes, OpenSubtitles v3 file tokens (e.g. v3_e1_...), UUIDs, or long alphanumeric keys
-        if raw.hasPrefix("v3_") || raw.hasPrefix("sub_") || raw.contains("AfAB") || raw.count > 25 {
+        // Filter out machine tokens, OpenSubtitles v3 file tokens (e.g. v3_e1_...), UUIDs, or raw hashes
+        if raw.hasPrefix("v3_") || raw.hasPrefix("sub_") || raw.hasPrefix("sub-") || raw.contains("AfAB") {
             return nil
         }
-        if raw.range(of: #"[a-zA-Z0-9_-]{15,}"#, options: .regularExpression) != nil {
+        if UUID(uuidString: raw) != nil {
+            return nil
+        }
+        if raw.range(of: #"^[0-9a-fA-F]{24,}$"#, options: .regularExpression) != nil {
+            return nil
+        }
+        if raw.range(of: #"^\d{5,}$"#, options: .regularExpression) != nil {
             return nil
         }
         let stripped = raw.replacingOccurrences(
@@ -1795,7 +1801,7 @@ struct PlayerSettingsPanel: View {
                         Text(detail)
                             .font(.system(size: 20, weight: .medium))
                             .foregroundColor(isFocused ? .black.opacity(0.52) : .white.opacity(0.5))
-                            .lineLimit(1)
+                            .lineLimit(2)
                     }
                 }
                 Spacer(minLength: 8)
