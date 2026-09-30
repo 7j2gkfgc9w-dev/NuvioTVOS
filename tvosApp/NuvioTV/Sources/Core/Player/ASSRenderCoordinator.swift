@@ -331,12 +331,8 @@ final class ASSRenderCoordinator {
     }
 
     private func hasActiveCue(at time: Double) -> Bool {
-        if let renderer, !renderer.dialogues(at: time).isEmpty {
-            return true
-        }
-        return player.subtitleCues.contains { cue in
-            time >= cue.startTime && time <= cue.endTime
-        }
+        guard let renderer else { return false }
+        return !renderer.dialogues(at: time).isEmpty
     }
 
     private func flushIfDue() {
