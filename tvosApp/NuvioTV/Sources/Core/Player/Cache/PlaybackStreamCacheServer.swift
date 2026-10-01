@@ -780,7 +780,7 @@ actor PlaybackStreamCacheServer {
     @discardableResult
     private func performForwardFillStep() async -> Bool {
         guard !diskWriteCoolingDown else { return false }
-        guard pendingWrites.count < Self.maxBatchChunks * 4 else { return false }
+        guard pendingWrites.count < Self.maxBatchChunks * 2 else { return false }
         checkThrottleRecovery()
         let coolingDown = throttleUntil.map { $0 > Date() } ?? false
         guard !coolingDown && !isThrottled else { return false }
@@ -886,7 +886,7 @@ actor PlaybackStreamCacheServer {
         let thermalState = ProcessInfo.processInfo.thermalState
         guard thermalState != .serious && thermalState != .critical else { return false }
         guard !diskWriteCoolingDown else { return false }
-        guard pendingWrites.count < Self.maxBatchChunks * 4 else { return false }
+        guard pendingWrites.count < Self.maxBatchChunks * 2 else { return false }
         checkThrottleRecovery()
         let coolingDown = throttleUntil.map { $0 > Date() } ?? false
         guard !coolingDown && !isThrottled else { return false }
@@ -1019,6 +1019,18 @@ actor PlaybackStreamCacheServer {
     private func performDemandFetch(_ index: Int) async -> Data? {
         guard !stopped, !Task.isCancelled else { return nil }
         if let cached = recentChunks[index] { return cached }
+        if let write = activeWrite, write.index == index { return write.data }
+        if let pending = pendingWrites.first(where: { $0.index == index }) { return pending.data }
+        if knownDiskChunks.contains(index) {
+            if let cached = await diskCache.readChunk(index) { return cached }
+            guard !stopped, !Task.isCancelled else { return nil }
+            knownDiskChunks.remove(index)
+        }
+        if let cached = await diskCache.readChunk(index) {
+            knownDiskChunks.insert(index)
+            return cached
+        }
+
         var singleChunkDemand = false
         if let existing = inFlightBatchFetches[index] {
             switch await joinBatchForDemand(existing, index: index) {
@@ -1032,26 +1044,11 @@ actor PlaybackStreamCacheServer {
         if let cached = recentChunks[index] { return cached }
         if let write = activeWrite, write.index == index { return write.data }
         if let pending = pendingWrites.first(where: { $0.index == index }) { return pending.data }
-        if knownDiskChunks.contains(index) {
-            if let cached = await diskCache.readChunk(index) { return cached }
-            guard !stopped, !Task.isCancelled else { return nil }
-            knownDiskChunks.remove(index)
-        }
         return await executeDemandFetch(index, singleChunk: singleChunkDemand)
     }
 
     private func executeDemandFetch(_ index: Int, singleChunk: Bool) async -> Data? {
-        var isSingle = singleChunk
-        if let existing = inFlightBatchFetches[index] {
-            switch await joinBatchForDemand(existing, index: index) {
-            case .chunk(let data):
-                return data
-            case .stalled, .cancelled:
-                isSingle = true
-            }
-            guard !stopped, !Task.isCancelled else { return nil }
-        }
-        let count = isSingle ? 1 : Self.maxBatchChunks
+        let count = singleChunk ? 1 : Self.maxBatchChunks
         let fetched = await fetchAndCacheBatch(
             startingAt: index, count: count,
             priority: .demand, awaitFirstChunk: true
@@ -1069,7 +1066,7 @@ actor PlaybackStreamCacheServer {
             removeCompletedBatch(existing.batch, count: existing.batch.count)
             return .cancelled
         }
-        let grace = min(demandBatchJoinGraceNanoseconds, 3_000_000_000)
+        let grace = demandBatchJoinGraceNanoseconds
         enum TaskResult {
             case chunk(Data?)
             case timedOut
@@ -1611,6 +1608,12 @@ actor PlaybackStreamCacheServer {
         }
         let readGeneration = clientReadGeneration
 
+        let requestStartTime = CFAbsoluteTimeGetCurrent()
+        let startChunkIdx = diskCache.chunkIndex(forByteOffset: requestedStart)
+        let endChunkIdx = diskCache.chunkIndex(forByteOffset: requestedEnd)
+        let isFullyOnDisk = (startChunkIdx...endChunkIdx).allSatisfy { knownDiskChunks.contains($0) }
+        diskCacheLog.info("[DiskCacheWatchdog] 📥 Range: bytes=\(requestedStart)-\(requestedEnd) (\(responseLength)B, chunks [\(startChunkIdx)..\(endChunkIdx)], allOnDisk: \(isFullyOnDisk))")
+
         var headers = isRangeRequest ? "HTTP/1.1 206 Partial Content\r\n" : "HTTP/1.1 200 OK\r\n"
         headers += "Content-Type: video/mp4\r\n"
         headers += "Accept-Ranges: bytes\r\n"
@@ -1625,6 +1628,7 @@ actor PlaybackStreamCacheServer {
 
         // Stream range to client using Demand Priority, clamped to chunk boundaries
         var currentOffset = requestedStart
+        var firstChunkDelivered = false
         while currentOffset <= requestedEnd && !Task.isCancelled {
             let chunkIdx = diskCache.chunkIndex(forByteOffset: currentOffset)
             let chunkRange = diskCache.byteRange(forChunk: chunkIdx)
@@ -1634,13 +1638,16 @@ actor PlaybackStreamCacheServer {
 
             // Demand owns the RAM fast path while an upstream batch is alive;
             // it falls back to a disk chunk read only when no shared transfer exists.
+            let chunkStartTime = CFAbsoluteTimeGetCurrent()
             var data: Data?
+            var fetchOrigin = "unknown"
             for retry in 0...2 {
                 if let fetched = await fetchDemandChunk(chunkIdx) {
                     let sliceStart = Int(currentOffset - chunkRange.lowerBound)
                     let sliceEnd = sliceStart + bytesToRead
                     if sliceStart >= 0, sliceEnd <= fetched.count {
                         data = Data(fetched[sliceStart..<sliceEnd])
+                        fetchOrigin = knownDiskChunks.contains(chunkIdx) ? "DISK" : (recentChunks[chunkIdx] != nil ? "RAM" : "NETWORK")
                         break
                     }
                 }
@@ -1649,17 +1656,27 @@ actor PlaybackStreamCacheServer {
                     try? await Task.sleep(nanoseconds: 50_000_000 * UInt64(retry + 1))
                 }
             }
+            let chunkElapsedMs = (CFAbsoluteTimeGetCurrent() - chunkStartTime) * 1000
 
             guard let bytesToSend = data, !bytesToSend.isEmpty else {
-                diskCacheLog.error("Demand fetch failed for offset \(currentOffset) in chunk \(chunkIdx) after retries. Aborting range response.")
+                diskCacheLog.error("[DiskCacheWatchdog] ❌ Demand fetch failed for offset \(currentOffset) in chunk \(chunkIdx) after retries. Aborting range response.")
                 break
             }
             try await NetworkIO.send(connection, bytesToSend)
+            if !firstChunkDelivered {
+                firstChunkDelivered = true
+                let ttfbMs = (CFAbsoluteTimeGetCurrent() - requestStartTime) * 1000
+                diskCacheLog.info("[DiskCacheWatchdog] ⚡ TTFB: \(String(format: "%.1f", ttfbMs))ms for chunk [\(chunkIdx)] (origin: \(fetchOrigin), chunkFetch: \(String(format: "%.1f", chunkElapsedMs))ms)")
+            }
             currentOffset += Int64(bytesToSend.count)
             if tracksPlaybackAnchor {
                 updateClientReadOffset(currentOffset, generation: readGeneration)
             }
         }
+
+        let totalRequestElapsedMs = (CFAbsoluteTimeGetCurrent() - requestStartTime) * 1000
+        let totalSentBytes = currentOffset - requestedStart
+        diskCacheLog.info("[DiskCacheWatchdog] 📤 Streamed \(totalSentBytes)/\(responseLength)B in \(String(format: "%.1f", totalRequestElapsedMs))ms (chunks [\(startChunkIdx)..\(self.diskCache.chunkIndex(forByteOffset: max(requestedStart, currentOffset - 1)))])")
 
         return false
     }

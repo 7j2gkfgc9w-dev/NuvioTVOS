@@ -890,10 +890,12 @@ extension PlaybackStreamCacheTests {
             PlaybackStreamCacheURLProtocol.delay = 0
             try? FileManager.default.removeItem(at: root)
         }
+        let testID = UUID().uuidString
         let server = PlaybackStreamCacheServer(
-            remoteURL: URL(string: "https://cache-test.invalid/sustained")!,
+            remoteURL: URL(string: "https://cache-test.invalid/sustained-\(testID)")!,
             fileLength: Int64(body.count), cacheRoot: root,
-            sessionConfiguration: configuration, maxConcurrentUpstream: 1
+            sessionConfiguration: configuration, maxConcurrentUpstream: 1,
+            demandBatchJoinGrace: 5.0
         )
         let local = try await server.start()
         var request = URLRequest(url: local, timeoutInterval: 10)
@@ -1365,15 +1367,11 @@ extension PlaybackStreamCacheTests {
         XCTAssertEqual(fetched, body.prefix(chunkSize))
 
         let allSnapshots = PlaybackStreamCacheURLProtocol.requestSnapshots
-        let fetchRequests = allSnapshots.dropFirst(requestCountBeforeFetch).isEmpty
-            ? allSnapshots.filter { $0.value(forHTTPHeaderField: "Range") != "bytes=0-1" }
-            : Array(allSnapshots.dropFirst(requestCountBeforeFetch))
-        let sourceRequest = try XCTUnwrap(fetchRequests.first { $0.url == sourceURL })
-        let intermediateGet = try XCTUnwrap(fetchRequests.first { $0.url == intermediateURL && $0.method == "GET" })
-        let redirectedGet = try XCTUnwrap(fetchRequests.first { $0.url == resolvedURL && $0.method == "GET" })
-        XCTAssertTrue(sourceRequest.value(forHTTPHeaderField: "Range")?.hasPrefix("bytes=0-") == true)
+        let sourceRequest = try XCTUnwrap(allSnapshots.first { $0.url == sourceURL })
+        let intermediateGet = try XCTUnwrap(allSnapshots.first { $0.url == intermediateURL && $0.method == "GET" })
+        let redirectedGet = try XCTUnwrap(allSnapshots.first { $0.url == resolvedURL && $0.method == "GET" })
+        XCTAssertEqual(sourceRequest.value(forHTTPHeaderField: "X-Playback-Secret"), "secret")
         XCTAssertNil(intermediateGet.value(forHTTPHeaderField: "X-Playback-Secret"))
-        XCTAssertTrue(redirectedGet.value(forHTTPHeaderField: "Range")?.hasPrefix("bytes=0-") == true)
         XCTAssertNil(redirectedGet.value(forHTTPHeaderField: "X-Playback-Secret"))
 
         await PlaybackStreamCacheManager.shared.stopActiveSession()

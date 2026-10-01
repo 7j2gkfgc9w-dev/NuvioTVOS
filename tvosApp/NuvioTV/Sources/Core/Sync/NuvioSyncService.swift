@@ -1511,7 +1511,6 @@ final class NuvioSyncManager: ObservableObject {
             // the launch window, before profile selection had settled.
             guard WatchedStore.activeProfileId == activeProfile.id else { return }
 
-            let profileStore = ProfileSettings.store(for: activeProfile.id)
             let ownsLibrary = Self.ownsLibrary(for: activeProfile.id)
             if scopes.contains(.library) && ownsLibrary {
                 try ensureStillSyncing(profileId: activeProfile.id)
@@ -2085,6 +2084,8 @@ enum PlayerSettingsSyncMapper {
         ("stream_auto_play_reuse_binge_group", SettingsKey.streamAutoPlayReuseBingeGroup),
         ("stream_cached_only", SettingsKey.cachedOnlyStreams),
         ("cached_only_streams", SettingsKey.cachedOnlyStreams),
+        ("preserve_addon_stream_order", SettingsKey.preserveAddonStreamOrder),
+        ("stream_preserve_addon_order", SettingsKey.preserveAddonStreamOrder),
         ("stream_sort_mode", SettingsKey.streamSortOption),
         ("smart_stream_selection", SettingsKey.smartStreamSelection),
         ("smart_stream_use_top_result", SettingsKey.smartStreamUseTopResult),
@@ -2111,6 +2112,7 @@ enum PlayerSettingsSyncMapper {
         (SettingsKey.streamAutoPlayPreferBingeGroup, "stream_auto_play_prefer_binge_group"),
         (SettingsKey.streamAutoPlayReuseBingeGroup, "stream_auto_play_reuse_binge_group"),
         (SettingsKey.cachedOnlyStreams, "stream_cached_only"),
+        (SettingsKey.preserveAddonStreamOrder, "preserve_addon_stream_order"),
         (SettingsKey.streamSortOption, "stream_sort_mode"),
         (SettingsKey.smartStreamSelection, "smart_stream_selection"),
         (SettingsKey.smartStreamUseTopResult, "smart_stream_use_top_result"),

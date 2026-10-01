@@ -488,8 +488,6 @@ final class CinemetaCatalogRepository: CatalogRepository {
         // ones Settings writes locally. Without this, hiding "Popular - Movies"
         // was the one toggle Home ignored.
         let disabledBuiltInKeys = TVHomeCatalogOrder.disabledCatalogKeys()
-        let activeHomeKeys = Set(TVHomeCatalogOrder.effectiveOrderKeys())
-        let collectionSources = CatalogHomeVisibilityResolver.activeCollectionSources()
 
         func builtInCatalogs() -> [NuvioCatalog] {
             guard cinemetaEnabled else { return [] }
@@ -524,10 +522,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
         // Publish the base rows now. Add-on catalogs can be slow or numerous;
         // they must not hold already-loaded rows off Home.
         var catalogs = builtInCatalogs()
-        let simklCatalogs = await simklPlanToWatchCatalogs(
-            collectionSources: collectionSources,
-            activeHomeKeys: activeHomeKeys
-        )
+        let simklCatalogs = await simklPlanToWatchCatalogs()
         catalogs.append(contentsOf: simklCatalogs)
         if !catalogs.isEmpty {
             onUpdate?(catalogs)
@@ -561,10 +556,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
             try Task.checkCancellation()
         }
 
-        let retriedBuiltIns = builtInCatalogs() + (await simklPlanToWatchCatalogs(
-            collectionSources: collectionSources,
-            activeHomeKeys: activeHomeKeys
-        ))
+        let retriedBuiltIns = builtInCatalogs() + (await simklPlanToWatchCatalogs())
         if retriedBuiltIns.count != catalogs.count {
             catalogs = retriedBuiltIns
             onUpdate?(catalogs)
@@ -578,10 +570,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
         var lastProgressiveUpdateAt: UInt64?
         var lastProgressiveUpdateCount = 0
         let progressiveUpdateIntervalNanoseconds: UInt64 = 1_500_000_000
-        let addonResult = await addonHomeCatalogs(
-            collectionSources: collectionSources,
-            activeHomeKeys: activeHomeKeys
-        ) { [weak self] catalog in
+        let addonResult = await addonHomeCatalogs { [weak self] catalog in
             guard let self else { return }
             progressiveAddonCatalogs.append(catalog)
             let now = DispatchTime.now().uptimeNanoseconds
@@ -615,17 +604,12 @@ final class CinemetaCatalogRepository: CatalogRepository {
         return catalogs
     }
 
-    private func simklPlanToWatchCatalogs(
-        collectionSources: [CatalogHomeVisibilityResolver.Source]? = nil,
-        activeHomeKeys: Set<String>? = nil
-    ) async -> [NuvioCatalog] {
+    private func simklPlanToWatchCatalogs() async -> [NuvioCatalog] {
         guard SimklSettingsStore.isPlanToWatchHomeCatalogsEnabled,
               SimklRuntimeSession.authenticatedState() != nil else {
             return []
         }
         let disabledKeys = TVHomeCatalogOrder.disabledCatalogKeys()
-        let activeKeys = activeHomeKeys ?? Set(TVHomeCatalogOrder.effectiveOrderKeys())
-        let sources = collectionSources ?? CatalogHomeVisibilityResolver.activeCollectionSources()
         let movieKey = TVHomeCatalogOrder.catalogSettingsKey(
             addonId: "simkl",
             contentType: "movie",
@@ -710,15 +694,11 @@ final class CinemetaCatalogRepository: CatalogRepository {
     /// only catalogs and ones needing unsupported extras are skipped; a
     /// required genre is satisfied with the catalog's first declared option.
     private func addonHomeCatalogs(
-        collectionSources: [CatalogHomeVisibilityResolver.Source]? = nil,
-        activeHomeKeys: Set<String>? = nil,
         onCatalogLoaded: ((NuvioCatalog) -> Void)? = nil
     ) async -> (catalogs: [NuvioCatalog], hadFailures: Bool) {
         // Catalogs the user hid from Home on another device (synced from the
         // account). Their key format matches the tvOS catalog id sans `addon_`.
         let disabledCatalogKeys = TVHomeCatalogOrder.disabledCatalogKeys()
-        let activeHomeKeys = activeHomeKeys ?? Set(TVHomeCatalogOrder.effectiveOrderKeys())
-        let collectionSources = collectionSources ?? CatalogHomeVisibilityResolver.activeCollectionSources()
         var catalogs: [NuvioCatalog] = []
         var reports: [String] = []
         var hadFailures = false
