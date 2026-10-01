@@ -824,6 +824,35 @@ extension PlayerControlsSettingsTests {
     }
 
     @MainActor
+    func testPauseClickJitterDoesNotTriggerScrubbing() {
+        let provider = ControlledScrubThumbnailProvider()
+        let model = PlayerViewModel(
+            sessionCoordinator: PlaybackSessionCoordinator(aetherControllerFactory: { nil }),
+            scrubThumbnailProvider: provider
+        )
+        model.time = PlayerTime(current: 120, duration: 3600)
+        model.status = .playing
+        model.showControls = false
+
+        // 1. Touch began on remote glass touchpad while playing (e.g. user touches down to click pause)
+        model.remoteTouchBegan()
+
+        // 2. Physical click pauses playback
+        model.pause()
+        XCTAssertEqual(model.status, .paused)
+        XCTAssertTrue(model.showControls, "Pausing should display controls")
+
+        // 3. Releasing thumb causes motion on the glass touchpad
+        model.remoteTouchMoved(dx: 55, dy: 5)
+        model.remoteTouchEnded(dx: 55, dy: 5)
+
+        // 4. Scrubbing must NOT engage; transport controls should remain visible
+        XCTAssertFalse(model.isScrubbing, "Touch stroke initiated before pause must not engage scrub")
+        XCTAssertTrue(model.showControls, "Controls must stay visible")
+    }
+
+
+    @MainActor
     func testControlsAutoHideIntervalsAndPanelSuspension() {
         let provider = ControlledScrubThumbnailProvider()
         let model = PlayerViewModel(
@@ -1017,6 +1046,61 @@ extension PlayerControlsSettingsTests {
         vm.selectEpisode(video)
         let switchingMsg = vm.loadingStepMessage
         XCTAssertFalse(switchingMsg.isEmpty)
+
+        // When advancing to next episode
+        vm.isAdvancingEpisode = true
+        vm.updateLoadingStepMessage()
+        XCTAssertEqual(vm.loadingStepMessage, L10n.string("player_searching_sources", fallback: "Searching sources…"))
+    }
+
+    @MainActor
+    func testRemoteTouchDoesNotSuppressMoveCommandForPhysicalClick() {
+        let coordinator = PlaybackSessionCoordinator(aetherControllerFactory: { nil })
+        let vm = PlayerViewModel(sessionCoordinator: coordinator)
+        vm.time = PlayerTime(current: 10, duration: 100)
+        vm.status = .playing
+
+        // Touching the remote clickpad down (without scrubbing) should NOT suppress move commands
+        vm.remoteTouchBegan()
+        XCTAssertFalse(vm.moveSuppressed, "Placing a finger on the remote must not suppress move commands")
+
+        // Micro-movements during a physical button press (< 15pt) should NOT suppress move commands
+        vm.remoteTouchMoved(dx: 5, dy: 5)
+        XCTAssertFalse(vm.moveSuppressed, "Micro-movement before clicking must not suppress move commands")
+
+        // Swiping across the threshold (>= 15pt) recognizes a swipe and suppresses move commands
+        vm.remoteTouchMoved(dx: 50, dy: 10)
+        XCTAssertTrue(vm.moveSuppressed, "Recognized swipe should suppress move commands")
+
+        vm.remoteTouchEnded(dx: 50, dy: 10)
+    }
+
+    @MainActor
+    func testSwipeWhilePlayingDoesNotSeekOnlyTapSeeks() {
+        let coordinator = PlaybackSessionCoordinator(aetherControllerFactory: { nil })
+        let vm = PlayerViewModel(sessionCoordinator: coordinator)
+        vm.time = PlayerTime(current: 100, duration: 1000)
+        vm.status = .playing
+        vm.showControls = false
+
+        // 1. Swiping across the trackpad while content is playing
+        vm.remoteTouchBegan()
+        vm.remoteTouchMoved(dx: 30, dy: 0)
+        XCTAssertTrue(vm.moveSuppressed, "Horizontal swipe while playing must suppress move commands")
+        XCTAssertFalse(vm.isScrubbing, "Horizontal swipe while playing must not enter scrub mode")
+        XCTAssertEqual(vm.pendingSeekDelta, 0, "Horizontal swipe must not trigger seek delta")
+
+        vm.remoteTouchEnded(dx: 30, dy: 0)
+        XCTAssertFalse(vm.isScrubbing)
+        XCTAssertEqual(vm.pendingSeekDelta, 0)
+
+        // 2. Tap / physical click (simulated by directional move command without swipe suppression)
+        // Reset moveSuppressed for tap simulation
+        vm.handleMoveSeek(direction: .right)
+        XCTAssertEqual(vm.pendingSeekDelta, 10, "Tapping / pressing right D-pad must trigger discrete +10s seek")
+
+        vm.handleMoveSeek(direction: .right)
+        XCTAssertEqual(vm.pendingSeekDelta, 20, "Second tap must accumulate to +20s seek")
     }
 }
 

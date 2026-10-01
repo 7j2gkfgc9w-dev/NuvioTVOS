@@ -317,7 +317,7 @@ class PlayerViewModel: ObservableObject {
     private var lastTraktProgressReport = Date.distantPast
     private var traktProgressTask: Task<Void, Never>?
     private static let traktProgressReportInterval: TimeInterval = 30
-    private var controlsAutoHideSuspended = false
+    private(set) var controlsAutoHideSuspended = false
     private var skipIntervals: [SkipInterval] = []
     private var autoHiddenSkipIntervalId: String?
     /// Segments the user skipped during this playback item. Keep these hidden
@@ -367,6 +367,7 @@ class PlayerViewModel: ObservableObject {
     var moveSuppressed: Bool { Date() < suppressMoveUntil }
     private enum TouchIntent { case undecided, scrub, consumed }
     private var touchIntent: TouchIntent = .undecided
+    private var touchBeganWhileStatus: PlayerStatus?
     private var wheelLastAngle: Double?
     private let wheelSecondsPerRevolution: Double = 24
     private var gcTouchDown = false
@@ -1118,6 +1119,11 @@ class PlayerViewModel: ObservableObject {
         self.autoHiddenSkipIntervalId = nil
         self.dismissedSkipIntervalIds = []
         self.skipSegmentAutoHideDeadline = nil
+        self.showNextEpisodeCard = false
+        self.nextEpisodeCountdown = nil
+        self.autoHiddenNextEpisodeCard = false
+        self.nextEpisodeAutoHideDeadline = nil
+        self.nextEpisodeAutoPlayDeadline = nil
         self.skipIntervalLoadTask?.cancel()
         self.didApplySavedAudioSelection = effectiveSelection?.audio == nil
         self.didApplySavedSubtitleSelection = effectiveSelection?.subtitle == nil
@@ -1318,6 +1324,10 @@ class PlayerViewModel: ObservableObject {
         guard let _ = nextEpisode,
               subtitle != PlaybackMarkers.trailerSubtitle,
               !isAdvanceInFlight,
+              !isAdvancingEpisode,
+              !isAwaitingStreamStart,
+              hasRenderedFirstFrame,
+              status == .playing || status == .paused,
               time.duration >= 60 else {
             clearNextEpisodeCard()
             return
@@ -1367,7 +1377,12 @@ class PlayerViewModel: ObservableObject {
     /// Prefer IntroDB ending start so Next Episode and Skip Ending appear together.
     /// Without an ending marker, fall back to the fixed lead-before-end window.
     private var shouldPresentNextEpisodeCard: Bool {
-        guard time.remaining > 0,
+        guard hasRenderedFirstFrame,
+              !isAdvanceInFlight,
+              !isAdvancingEpisode,
+              !isAwaitingStreamStart,
+              time.duration >= 60,
+              time.remaining > 0,
               time.current / time.duration >= 0.5 else {
             return false
         }
@@ -1568,6 +1583,7 @@ class PlayerViewModel: ObservableObject {
         let gen = advanceGeneration
         isAdvanceInFlight = true
         isAdvancingEpisode = true
+        loadingStepMessage = L10n.string("player_searching_sources", fallback: "Searching sources…")
         nextEpisodeCountdown = nil
         nextEpisodeAutoHideDeadline = nil
         nextEpisodeAutoPlayDeadline = nil
@@ -1670,12 +1686,7 @@ class PlayerViewModel: ObservableObject {
                 filename: prepared.filename
             )
         }
-        autoHiddenNextEpisodeCard = false
-        showNextEpisodeCard = false
-        nextEpisodeCountdown = nil
-        nextEpisodeAutoHideDeadline = nil
-        nextEpisodeAutoPlayDeadline = nil
-        isAdvancingEpisode = false
+        clearNextEpisodeCard()
         isReloadingStream = false
         isSwitchingSource = false
         showControls = false
@@ -2227,13 +2238,13 @@ class PlayerViewModel: ObservableObject {
            latestTime.duration > 0,
            latestTime.current >= 0,
            latestTime.current < latestTime.duration {
-            // The settings panel does not display coarse playback time. Publish at most
-            // once per displayed second while it is open, while the controller is
-            // still polled at 4 Hz for playback/error handling.
-            if !showSettingsPanel ||
-                Int(latestTime.current) != Int(time.current) ||
-                latestTime.duration != time.duration {
+            // Neither the settings panel nor native menus (subtitles/audio) display coarse
+            // playback time. While open, do not publish continuous time updates so view
+            // re-evaluations do not trigger UIKit menu reloads or reset menu focus.
+            if !showSettingsPanel && !controlsAutoHideSuspended {
                 if latestTime != time { time = latestTime }
+            } else if latestTime.duration != time.duration {
+                time = latestTime
             }
 
             // High-frequency clock and disk cache polling must ALWAYS update live,
@@ -2364,6 +2375,7 @@ class PlayerViewModel: ObservableObject {
             }
             isAwaitingStreamStart = false
             isAdvanceInFlight = false
+            isAdvancingEpisode = false
             markLoadStarted()
         }
 
@@ -2743,6 +2755,7 @@ class PlayerViewModel: ObservableObject {
         let target = duration > 0
             ? min(max(seconds, 0), max(duration - 0.25, 0))
             : max(seconds, 0)
+        print("[SeekWatchdog][PlayerVM] 👆 User seek to \(String(format: "%.3f", seconds))s (target: \(String(format: "%.3f", target))s, current: \(String(format: "%.3f", time.current))s, duration: \(String(format: "%.3f", duration))s)")
         screensaverDebugLog("[ScreensaverDebug][PlayerVM] seek(to: \(seconds)) called: target=\(target), prevCurrent=\(time.current), duration=\(duration)")
         engine.seekToMs(Int64(target * 1000))
         if let source = activeStreamURL.flatMap(URL.init(string:)) {
@@ -3002,8 +3015,8 @@ class PlayerViewModel: ObservableObject {
         return sign * absInc * baseRate * speedMultiplier
     }
 
-    private func suppressMoveBriefly() {
-        suppressMoveUntil = Date().addingTimeInterval(0.4)
+    private func suppressMoveBriefly(_ duration: TimeInterval = 0.4) {
+        suppressMoveUntil = max(suppressMoveUntil, Date().addingTimeInterval(duration))
     }
 
     private func publishScrub(_ value: Double) {
@@ -3038,7 +3051,9 @@ class PlayerViewModel: ObservableObject {
 
     func updateLoadingStepMessage() {
         let nextMessage: String
-        if isSwitchingSource {
+        if isAdvancingEpisode {
+            nextMessage = L10n.string("player_searching_sources", fallback: "Searching sources…")
+        } else if isSwitchingSource {
             nextMessage = switchingSourceMessage
         } else if isReloadingStream {
             nextMessage = L10n.string("player_loading_preparing", fallback: "Preparing stream…")
@@ -3274,6 +3289,7 @@ class PlayerViewModel: ObservableObject {
         resetWheel()
         clock.scrubTarget = nil
         touchIntent = .undecided
+        touchBeganWhileStatus = nil
         scrubLastDx = 0
         scrubEngagedThisStroke = false
     }
@@ -3354,16 +3370,19 @@ class PlayerViewModel: ObservableObject {
         guard !isHoldingSeek, pendingSeekDelta == 0 else { return }
         scrubLastDx = 0
         scrubEngagedThisStroke = false
-        suppressMoveBriefly()
+        touchBeganWhileStatus = status
+        if isScrubbing {
+            suppressMoveBriefly()
+        }
         noteSwipeStarted()
         touchIntent = isScrubbing ? .scrub : .undecided
     }
 
     func remoteTouchMoved(dx: CGFloat, dy: CGFloat) {
         guard !isHoldingSeek, pendingSeekDelta == 0 else { return }
-        suppressMoveBriefly()
         switch touchIntent {
         case .scrub:
+            suppressMoveBriefly()
             if !scrubEngagedThisStroke {
                 // Ignore micro-shifts (< 10pt) during taps or physical OK clicks on the touchpad
                 guard abs(dx) >= 10 else { return }
@@ -3371,18 +3390,25 @@ class PlayerViewModel: ObservableObject {
             }
             scrubPanPoints(dx: dx)
         case .consumed:
-            break
+            suppressMoveBriefly()
         case .undecided:
             let adx = abs(dx), ady = abs(dy)
-            guard max(adx, ady) > 45 else { return }
+            guard max(adx, ady) >= 15 else { return }
+            suppressMoveBriefly()
             if ady > adx {
                 touchIntent = .consumed
                 // Vertical swipe: reveal controls. (Info panel is a later port.)
                 revealControls()
             } else {
-                // Horizontal drag → enter scrub whenever paused, bringing the Infuse scrubber to the front
-                guard status == .paused else {
-                    touchIntent = .consumed
+                // While playing: horizontal swipes are suppressed (no swipe seeking, only tap seek).
+                // While paused: enter scrub only when playback was already paused when the touch began.
+                guard status == .paused,
+                      touchBeganWhileStatus == .paused,
+                      adx >= 35,
+                      adx > ady * 1.5 else {
+                    if status != .paused || touchBeganWhileStatus != .paused {
+                        touchIntent = .consumed
+                    }
                     return
                 }
                 beginScrub()
@@ -3396,8 +3422,13 @@ class PlayerViewModel: ObservableObject {
 
     func remoteTouchEnded(dx: CGFloat, dy: CGFloat) {
         guard !isHoldingSeek, pendingSeekDelta == 0 else { return }
-        if touchIntent == .scrub { endScrubGesture() }
+        if touchIntent == .scrub {
+            endScrubGesture()
+        } else if touchIntent == .consumed || max(abs(dx), abs(dy)) >= 15 {
+            suppressMoveBriefly(0.3)
+        }
         scrubEngagedThisStroke = false
+        touchBeganWhileStatus = nil
         touchIntent = .undecided
     }
 
@@ -4205,12 +4236,15 @@ class PlayerViewModel: ObservableObject {
 
     func revealControls() {
         hidePeek()
-        if isScrubbing { return }
+        if isScrubbing || controlsAutoHideSuspended { return }
         // Full transport chrome supersedes the pause metadata sheet.
         cancelPauseOverlaySchedule()
         showPauseOverlay = false
+        let wasHidden = !showControls
         showControls = true
-        isTimelineFocused = true
+        if wasHidden {
+            isTimelineFocused = true
+        }
         updateSkipIntervalState()
         if status == .playing {
             scheduleControlsHide()
@@ -4459,13 +4493,11 @@ class PlayerViewModel: ObservableObject {
     }
 
     func setControlsAutoHideSuspended(_ suspended: Bool) {
+        guard controlsAutoHideSuspended != suspended else { return }
         controlsAutoHideSuspended = suspended
         if suspended {
             controlsHideTimer?.invalidate()
             cancelPauseOverlaySchedule()
-            showPauseOverlay = false
-            showControls = true
-            updateSkipIntervalState()
         } else if showControls {
             if status == .playing {
                 scheduleControlsHide()

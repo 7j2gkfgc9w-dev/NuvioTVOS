@@ -440,7 +440,7 @@ final class ASSRenderCoordinator {
         }
     }
 
-    private nonisolated(unsafe) static let registeredFontsLock = NSLock()
+    private nonisolated static let registeredFontsLock = NSLock()
     private nonisolated(unsafe) static var registeredFontNames = Set<String>()
 
     private nonisolated static func registerFontsAsync(fonts: [FontAttachment], in directory: URL) {
