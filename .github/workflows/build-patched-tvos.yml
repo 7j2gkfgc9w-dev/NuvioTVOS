@@ -1,0 +1,21 @@
+name: Build patched tvOS IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+      - name: Build unsigned tvOS IPA
+        run: ./scripts/build-ipa.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NuvioTV-profile-sync-fix
+          path: build-ipa/*.ipa

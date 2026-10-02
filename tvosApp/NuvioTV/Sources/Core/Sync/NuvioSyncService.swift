@@ -1700,7 +1700,8 @@ private enum ProfileSyncIndexStore {
             localByRemoteId[remoteId] = localByRemoteId[remoteId] ?? profile
         }
 
-        return remoteProfiles
+        let remoteIds = Set(remoteProfiles.map(\.profileIndex))
+        var merged = remoteProfiles
             .sorted { $0.profileIndex < $1.profileIndex }
             .map { remote in
                 let preservedProfile = localByRemoteId[remote.profileIndex]
@@ -1718,6 +1719,21 @@ private enum ProfileSyncIndexStore {
                     usesPrimaryPlugins: remote.usesPrimaryPlugins
                 )
             }
+
+        // A locally-created account profile can exist before the backend confirms
+        // its sync_push_profiles write. Older cloud state must never make that
+        // pending profile disappear on the next account pull. Numeric ids are
+        // server-owned rows; preserve only locally-created ids whose bound remote
+        // slot is still absent from the server response.
+        let pendingLocal = localProfiles.filter { profile in
+            guard profile.id != "guest", Int(profile.id) == nil else { return false }
+            let mapped = UserDefaults.standard.integer(forKey: prefix + profile.id)
+            return (1...6).contains(mapped) && !remoteIds.contains(mapped)
+        }
+        for profile in pendingLocal where !merged.contains(where: { $0.id == profile.id }) {
+            merged.append(profile)
+        }
+        return merged
     }
 
     private static func bind(localId: String, remoteId: Int) {
